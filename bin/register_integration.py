@@ -306,7 +306,7 @@ def register_action_hub_and_extension(
         raise RuntimeError("Could not find action-pptx integration on the registered hub.")
 
     params = [
-        models40.WriteIntegrationParam(name=k, value=v)
+        models40.IntegrationParam(name=k, value=v)
         for k, v in (
             ("templates_gcs_uri", templates_gcs_uri),
             ("output_gcs_uri", output_gcs_uri),
@@ -318,7 +318,7 @@ def register_action_hub_and_extension(
         has_attr = any(a.name == req_attr for a in sdk.all_user_attributes())
         if has_attr:
             params.append(
-                models40.WriteIntegrationParam(
+                models40.IntegrationParam(
                     name="action_access_param",
                     user_attribute_name=req_attr,
                 )
