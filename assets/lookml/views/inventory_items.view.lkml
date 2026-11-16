@@ -304,9 +304,9 @@ view: inventory_items {
   measure: total_revenue {
     label: "Total Revenue"
     type: string
-    sql: CASE ${account_sort}
+    sql: MAX(CASE ${account_sort}
       WHEN 0 THEN '$684,210'
       WHEN 1 THEN '$412,900'
-      ELSE '$298,450' END ;;
+      ELSE '$298,450' END) ;;
   }
 }

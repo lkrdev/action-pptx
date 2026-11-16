@@ -7,6 +7,7 @@ application: action_pptx_template_manager {
   entitlements: {
     core_api_methods: [
       "me",
+      "all_dashboards",
       "search_dashboards",
       "dashboard",
       "lookml_model_explore",
@@ -17,14 +18,16 @@ application: action_pptx_template_manager {
       "all_integrations",
       "all_user_attributes",
       "create_user_attribute",
-      "set_user_attribute_group_values"
+      "delete_user_attribute",
+      "all_themes",
+      "all_color_collections"
     ]
-    scoped_user_attributes: ["action_hub_secret"]
+    global_user_attributes: ["brand"]
     external_api_urls: [
-      "https://*.a.run.app",
-      "https://*.trycloudflare.com",
-      "https://oauth2.googleapis.com"
+      # Replace with your deployed Cloud Run URL:
+      "https://*.a.run.app"
     ]
+    # only required for OAuth2 use in the Action and Extension
     oauth2_urls: [
       "https://accounts.google.com/o/oauth2/v2/auth",
       "https://oauth2.googleapis.com/token"

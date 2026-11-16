@@ -2,6 +2,7 @@
 # /// script
 # requires-python = ">=3.14"
 # dependencies = [
+#     "looker-sdk>=24.0.0",
 #     "typer>=0.9.0",
 #     "rich>=13.0.0",
 #     "questionary>=2.0.0",
@@ -14,6 +15,7 @@ import hashlib
 import hmac
 import os
 import secrets
+import shutil
 import subprocess
 import sys
 import time
@@ -23,7 +25,18 @@ import questionary
 import typer
 from rich.console import Console
 from rich.panel import Panel
+from rich.syntax import Syntax
 from rich.table import Table
+
+BIN_DIR = Path(__file__).resolve().parent
+if str(BIN_DIR) not in sys.path:
+    sys.path.insert(0, str(BIN_DIR))
+
+from register_integration import (  # noqa: E402
+    build_manifest_application_block,
+    list_looker_connections,
+    register_action_hub_and_extension,
+)
 
 console = Console()
 
@@ -35,6 +48,7 @@ def run_cmd(
     capture_output: bool = False,
     env: dict[str, str] | None = None,
     input_text: str | None = None,
+    cwd: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a shell command with consistent logging and error handling."""
     try:
@@ -45,6 +59,7 @@ def run_cmd(
             capture_output=capture_output,
             env=env,
             input=input_text,
+            cwd=str(cwd) if cwd else None,
             stdin=None if input_text is not None else subprocess.DEVNULL,
         )
     except subprocess.CalledProcessError as exc:
@@ -81,6 +96,17 @@ def run_cmd_with_retry(
     sys.exit(1)
 
 
+def _maybe_build_extension_bundle(repo_root: Path, from_source: bool) -> str | None:
+    ext_dir = repo_root / "extension"
+    dist_bundle = ext_dir / "dist" / "bundle.js"
+    if from_source and (ext_dir / "package.json").is_file() and shutil.which("npm"):
+        console.print("[bold cyan]Building Looker Extension bundle from source...[/bold cyan]")
+        if not (ext_dir / "node_modules").is_dir():
+            run_cmd(["npm", "ci", "--no-audit", "--no-fund"], cwd=ext_dir)
+        run_cmd(["npm", "run", "build"], cwd=ext_dir)
+    return str(dist_bundle) if dist_bundle.is_file() else None
+
+
 def main(
     project_id: str | None = typer.Option(
         None, "--project-id", "-p", help="Google Cloud Project ID"
@@ -102,7 +128,7 @@ def main(
     register_looker: bool | None = typer.Option(
         None,
         "--register-looker/--no-register-looker",
-        help="Automatically register the action in Looker",
+        help="Automatically register the Action Hub & Extension in Looker",
     ),
     looker_url: str | None = typer.Option(None, "--looker-url", help="Looker Base URL"),
     looker_client_id: str | None = typer.Option(
@@ -110,6 +136,29 @@ def main(
     ),
     looker_client_secret: str | None = typer.Option(
         None, "--looker-client-secret", help="Looker Client Secret"
+    ),
+    extension_mode: str | None = typer.Option(
+        None,
+        "--extension-mode",
+        help=(
+            "Extension setup mode: 'new' (deploy to new LookML project), "
+            "'existing' (print manifest block), or 'skip'"
+        ),
+    ),
+    looker_project: str | None = typer.Option(
+        None,
+        "--looker-project",
+        help="LookML project ID when deploying the Extension to a new project",
+    ),
+    looker_model: str | None = typer.Option(
+        None,
+        "--looker-model",
+        help="LookML model name to configure when deploying to a new project",
+    ),
+    looker_connection: str | None = typer.Option(
+        None,
+        "--looker-connection",
+        help="Looker database connection name to attach to the new project's model",
     ),
     oauth_client_id: str | None = typer.Option(
         None,
@@ -122,6 +171,18 @@ def main(
         "--oauth-client-secret",
         envvar="GOOGLE_OAUTH_CLIENT_SECRET",
         help="Shared Google Web OAuth 2.0 Client Secret (for Custom Action offline tokens)",
+    ),
+    action_label: str = typer.Option(
+        "PowerPoint Template Merge (action-pptx)",
+        "--action-label",
+        envvar="ACTION_LABEL",
+        help="Display label shown for the action in Looker Admin & Schedule modal",
+    ),
+    required_user_attribute: str = typer.Option(
+        "",
+        "--required-user-attribute",
+        envvar="REQUIRED_USER_ATTRIBUTE",
+        help="Optional Looker User Attribute name to restrict who can see and execute this action",
     ),
 ) -> None:
     console.print(
@@ -185,10 +246,12 @@ def main(
     if register_looker is None:
         register_looker = bool(
             questionary.confirm(
-                "Do you want to automatically register this action in Looker?", default=False
+                "Do you want to automatically configure the Action Hub & Extension in Looker?",
+                default=True,
             ).ask()
         )
 
+    resolved_ext_mode = (extension_mode or "").strip().lower()
     if register_looker:
         console.print("\n[bold yellow]Note:[/bold yellow] Looker API credentials are not stored.")
         looker_url = (
@@ -201,6 +264,87 @@ def main(
         looker_client_secret = (
             looker_client_secret or questionary.password("Enter Looker Client Secret:").ask()
         )
+        if not looker_url or not looker_client_id or not looker_client_secret:
+            console.print(
+                "[bold red]Error: Looker URL, Client ID, and Client Secret are required.[/bold red]"
+            )
+            raise typer.Exit(1)
+
+        if resolved_ext_mode not in ("new", "existing", "skip"):
+            ext_choice = questionary.select(
+                "How would you like to set up the PowerPoint Template Manager Extension?",
+                choices=[
+                    questionary.Choice(
+                        "Deploy Extension bundle to a NEW LookML project "
+                        "(configures model & connection)",
+                        value="new",
+                    ),
+                    questionary.Choice(
+                        "Add Extension to an EXISTING LookML project "
+                        "(prints manifest.lkml application block)",
+                        value="existing",
+                    ),
+                    questionary.Choice(
+                        "Skip Extension setup (register Action Hub only)",
+                        value="skip",
+                    ),
+                ],
+                default="new",
+            ).ask()
+            resolved_ext_mode = str(ext_choice or "existing")
+
+        if resolved_ext_mode == "new":
+            looker_project = (
+                looker_project
+                or questionary.text("Enter new LookML Project ID:", default="action-pptx").ask()
+                or "action-pptx"
+            )
+            looker_model = (
+                looker_model
+                or questionary.text(
+                    "Enter LookML Model name to configure:", default="action_pptx_extension"
+                ).ask()
+                or "action_pptx_extension"
+            )
+            if not looker_connection:
+                with console.status("[bold cyan]Fetching Looker database connections..."):
+                    connections = list_looker_connections(
+                        looker_url, looker_client_id, looker_client_secret
+                    )
+                if not connections:
+                    console.print(
+                        "[bold red]No database connections found on this Looker "
+                        "instance.[/bold red]"
+                    )
+                    raise typer.Exit(1)
+
+                conn_table = Table(
+                    title="Available Looker Database Connections",
+                    show_header=True,
+                    header_style="bold cyan",
+                )
+                conn_table.add_column("Connection Name", style="green")
+                conn_table.add_column("Dialect", style="magenta")
+                conn_table.add_column("Database / Project", style="white")
+                for cname, cdialect, cdb in connections:
+                    conn_table.add_row(cname, cdialect or "-", cdb or "-")
+                console.print("\n", conn_table)
+
+                looker_connection = questionary.select(
+                    f"Select database connection for model '{looker_model}':",
+                    choices=[
+                        questionary.Choice(
+                            f"{cname} ({cdialect})" if cdialect else cname,
+                            value=cname,
+                        )
+                        for cname, cdialect, _ in connections
+                    ],
+                ).ask()
+                if not looker_connection:
+                    console.print("[bold red]Error: A connection must be selected.[/bold red]")
+                    raise typer.Exit(1)
+    else:
+        resolved_ext_mode = resolved_ext_mode or "existing"
 
     apis = [
         "run.googleapis.com",
@@ -237,23 +381,24 @@ def main(
     else:
         console.print(f"GCS bucket [bold green]gs://{bucket_name}[/bold green] already exists.")
 
-    repo_root = Path(__file__).resolve().parent.parent
-    sample_template = repo_root / "examples" / "simple_template.pptx"
-    if sample_template.is_file():
-        console.print(
-            "Uploading sample template to "
-            f"[bold cyan]{templates_gcs_uri}/simple_template.pptx[/bold cyan]..."
-        )
-        run_cmd(
-            [
-                "gcloud",
-                "storage",
-                "cp",
-                str(sample_template),
-                f"{templates_gcs_uri}/simple_template.pptx",
-            ],
-            capture_output=True,
-        )
+    repo_root = BIN_DIR.parent
+    for sample_name in ("simple_template.pptx", "embed_demo_template.pptx"):
+        sample_file = repo_root / "assets" / sample_name
+        if sample_file.is_file():
+            console.print(
+                "Uploading sample template to "
+                f"[bold cyan]{templates_gcs_uri}/{sample_name}[/bold cyan]..."
+            )
+            run_cmd(
+                [
+                    "gcloud",
+                    "storage",
+                    "cp",
+                    str(sample_file),
+                    f"{templates_gcs_uri}/{sample_name}",
+                ],
+                capture_output=True,
+            )
 
     if not service_account_email:
         project_number = run_cmd(
@@ -317,8 +462,11 @@ def main(
     env_vars = [
         f"ALLOWED_GCS_BUCKETS={bucket_name}",
         "ACTION_HUB_LABEL=Looker PowerPoint Action Hub",
+        f"ACTION_LABEL={action_label}",
         "PUBLIC_BASE_URL=http://placeholder",
     ]
+    if required_user_attribute.strip():
+        env_vars.append(f"REQUIRED_USER_ATTRIBUTE={required_user_attribute.strip()}")
     if oauth_client_id:
         env_vars.extend(
             [
@@ -383,33 +531,44 @@ def main(
     ).hexdigest()
     api_key_token = f"{nonce}/{digest}"
 
+    deployed_extension_id: str | None = None
     if register_looker:
-        console.print("\n[bold cyan]Registering action with Looker Instance...[/bold cyan]")
-        env = {
-            **os.environ,
-            "SERVICE_URL": service_url,
-            "API_KEY_TOKEN": api_key_token,
-            "TEMPLATES_GCS_URI": templates_gcs_uri,
-            "OUTPUT_GCS_URI": output_gcs_uri,
-            "LOOKERSDK_CLIENT_ID": looker_client_id or "",
-            "LOOKERSDK_CLIENT_SECRET": looker_client_secret or "",
-            "LOOKERSDK_BASE_URL": looker_url or "",
-        }
-        run_cmd(
-            ["uv", "run", str(Path(__file__).resolve().parent / "register_integration.py")], env=env
+        console.print("\n[bold cyan]Configuring Looker Action Hub & Extension...[/bold cyan]")
+        bundle_path = (
+            _maybe_build_extension_bundle(repo_root, from_source)
+            if resolved_ext_mode == "new"
+            else None
+        )
+        deployed_extension_id = register_action_hub_and_extension(
+            service_url=service_url,
+            api_key_token=api_key_token,
+            templates_gcs_uri=templates_gcs_uri,
+            output_gcs_uri=output_gcs_uri,
+            required_user_attribute=required_user_attribute,
+            extension_mode=resolved_ext_mode,
+            project_id=looker_project or "action-pptx",
+            model_name=looker_model or "action_pptx_extension",
+            connection_name=looker_connection or "",
+            bundle_path=bundle_path,
+            base_url=looker_url,
+            client_id=looker_client_id,
+            client_secret=looker_client_secret,
         )
 
     table = Table(
-        title="Looker Action Hub Registration Details",
+        title="Looker Action Hub & Extension Details",
         show_header=True,
         header_style="bold magenta",
     )
     table.add_column("Parameter", style="cyan", width=32)
-    table.add_column("Value", style="green")
+    table.add_column("Value", style="green", overflow="fold")
     table.add_row("Action Hub URL", service_url)
     table.add_row("Authorization Token (API Key)", api_key_token)
     table.add_row("Templates GCS URI", templates_gcs_uri)
     table.add_row("Output GCS Package Bucket URI", output_gcs_uri)
+    if deployed_extension_id and looker_url:
+        ext_link = f"{looker_url.rstrip('/')}/extensions/{deployed_extension_id}"
+        table.add_row("Deployed Looker Extension", ext_link)
 
     console.print(
         "\n",
@@ -420,6 +579,22 @@ def main(
             padding=(1, 2),
         ),
     )
+    console.print(f"\n[bold cyan]Copyable API Key:[/bold cyan]\n{api_key_token}", soft_wrap=True)
+
+    if resolved_ext_mode == "existing":
+        manifest_snippet = build_manifest_application_block(service_url, use_local_bundle=False)
+        console.print(
+            "\n",
+            Panel(
+                Syntax(manifest_snippet, "ruby", theme="monokai", word_wrap=True),
+                title="[bold cyan]Paste into your existing project's manifest.lkml[/bold cyan]",
+                border_style="cyan",
+                padding=(1, 2),
+            ),
+        )
+        console.print(
+            f"\n[bold cyan]Raw copyable manifest.lkml block:[/bold cyan]\n{manifest_snippet}\n"
+        )
 
 
 if __name__ == "__main__":

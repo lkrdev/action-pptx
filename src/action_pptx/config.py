@@ -31,6 +31,8 @@ class Settings:
     allowed_gcs_buckets: frozenset[str]
     allowed_oauth_domains: frozenset[str]
     oauth_gcs_passthrough: bool
+    action_label: str = "PowerPoint Template Merge (action-pptx)"
+    required_user_attribute: str = ""
     google_oauth_client_id: str = ""
     google_oauth_client_secret: str = ""
     cipher_master: str = ""
@@ -47,10 +49,17 @@ def load_settings() -> Settings:
     client_id = os.environ.get("GOOGLE_OAUTH_CLIENT_ID", "").strip()
     client_secret = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET", "").strip()
     cipher_master = (os.environ.get("CIPHER_MASTER") or secret or "action-pptx-default-key").strip()
+    req_attr = os.environ.get("REQUIRED_USER_ATTRIBUTE", "").strip()
+    if not req_attr and os.environ.get("RESTRICT_BY_USER_ATTRIBUTE", "").lower() == "true":
+        req_attr = "can_use_action_pptx"
     return Settings(
         action_hub_secret=secret,
         public_base_url=base_url,
         action_hub_label=os.environ.get("ACTION_HUB_LABEL", "Looker PowerPoint Action Hub"),
+        action_label=(
+            os.environ.get("ACTION_LABEL", "").strip() or "PowerPoint Template Merge (action-pptx)"
+        ),
+        required_user_attribute=req_attr,
         allowed_gcs_buckets=_split_csv_env("ALLOWED_GCS_BUCKETS"),
         allowed_oauth_domains=_split_csv_env("ALLOWED_OAUTH_DOMAINS"),
         oauth_gcs_passthrough=os.environ.get("OAUTH_GCS_PASSTHROUGH", "").lower() == "true",

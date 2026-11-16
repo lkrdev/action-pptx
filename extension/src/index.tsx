@@ -253,14 +253,14 @@ const EMBED_DEMO_TILE_DEFS: MockTileDef[] = [
   {
     title: "Return & Cancellation Hotspots by Category",
     id: "ed_churn",
-    fields: ["Category", "Returned Count", "Cancelled Count", "Transaction Churn Ratio"],
+    fields: ["Category", "Count Returned", "Count Cancelled"],
     csv:
-      "Category,Returned Count,Cancelled Count,Transaction Churn Ratio\n" +
-      "Jeans,380,210,0.109\n" +
-      "Outerwear & Coats,290,175,0.146\n" +
-      "Sweaters,220,160,0.098\n" +
-      "Tops & Tees,175,140,0.068\n" +
-      "Accessories,115,105,0.075\n",
+      "Category,Count Returned,Count Cancelled\n" +
+      "Jeans,380,210\n" +
+      "Outerwear & Coats,290,175\n" +
+      "Sweaters,220,160\n" +
+      "Tops & Tees,175,140\n" +
+      "Accessories,115,105\n",
   },
 ];
 
@@ -291,6 +291,7 @@ function createMockHarness(apiBase: string, secret: string, unconfigured: boolea
       expires_in: 3600,
     }),
     createSecretKeyTag: (key: string) => key,
+    openBrowserWindow: (url: string, target?: string) => window.open(url, target || "_blank"),
     userAttributeGetItem: async (attr: string) =>
       attr === "brand" ? "Levi's" : "gs://fifth-inkwell-452619-v2-action-pptx/templates",
     serverProxy: async (url: string, init: any) => {
@@ -308,9 +309,50 @@ function createMockHarness(apiBase: string, secret: string, unconfigured: boolea
 
   const core40SDK = {
     ok: async (val: any) => await val,
+    me: async () => ({ id: "21", personal_folder_id: "43", display_name: "Demo User" }),
+    all_dashboards: async () => [
+      {
+        id: "embed_demo::brand_overview",
+        title: "Brand Overview",
+        model: { id: "embed_demo", label: "Embed Demo" },
+        folder: { id: "lookml", name: "LookML Dashboards" },
+        description: "Multi-brand executive pulse across sales, customers, and fulfillment",
+      },
+      {
+        id: "action_pptx_extension::executive_business_review",
+        title: "Executive Business Review",
+        model: { id: "action_pptx_extension", label: "Action PPTX" },
+        folder: { id: "lookml", name: "LookML Dashboards" },
+        description: "9-tile quarterly business review showcase",
+      },
+      {
+        id: "155",
+        title: "Brand Overview",
+        folder: { id: "12542", name: "Embed Demo", is_personal: false },
+      },
+      {
+        id: "170",
+        title: "Q4 Merchandising Scorecard",
+        folder: { id: "43", name: "Personal Folder", is_personal: true },
+      },
+    ],
     search_dashboards: async () => [
-      { id: "embed_demo::brand_overview", title: "Brand Overview (Looker Embed Demo)" },
-      { id: "action_pptx::executive_business_review", title: "Executive Business Review" },
+      {
+        id: "170",
+        title: "Q4 Merchandising Scorecard",
+        user_id: "21",
+        last_viewed_at: "2026-11-15 18:20:00+00:00",
+        view_count: 19,
+        folder: { id: "43", name: "Personal Folder", is_personal: true },
+      },
+      {
+        id: "155",
+        title: "Brand Overview",
+        user_id: "21",
+        last_viewed_at: "2026-11-14 09:10:00+00:00",
+        view_count: 42,
+        folder: { id: "12542", name: "Embed Demo", is_personal: false },
+      },
     ],
     dashboard: async (id: string) => {
       const isEmbedDemo = id.includes("embed_demo") || id.includes("brand_overview");
@@ -363,7 +405,10 @@ function createMockHarness(apiBase: string, secret: string, unconfigured: boolea
       },
     ],
     all_user_attributes: async () => [],
+    delete_user_attribute: async () => "",
     create_user_attribute: async () => ({}),
+    all_themes: async () => [],
+    all_color_collections: async () => [],
   };
 
   return { extensionSDK, core40SDK };
@@ -385,7 +430,12 @@ async function mount() {
     return;
   }
 
-  const extensionSDK = await connectExtensionHost();
+  const extensionSDK = await connectExtensionHost({
+    chattyTimeout: -1,
+    hostChangedRoute: (nextRoute) => {
+      window.dispatchEvent(new CustomEvent("looker-route", { detail: nextRoute || "/" }));
+    },
+  });
   const core40SDK = LookerExtensionSDK.createClient(extensionSDK);
   root.render(<App core40SDK={core40SDK} extensionSDK={extensionSDK} />);
 }
