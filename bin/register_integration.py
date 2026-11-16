@@ -153,7 +153,7 @@ def deploy_extension_to_new_project(
     sdk.update_session(body=models40.WriteApiSession(workspace_id="dev"))
 
     try:
-        proj = sdk.project(project_id=project_id)
+        proj = sdk.project(project_id=project_id, fields="id,name,uses_git")
     except Exception:
         proj = sdk.create_project(body=models40.WriteProject(name=project_id))
         print(f"Created LookML project '{project_id}'.")
@@ -202,15 +202,15 @@ def deploy_extension_to_new_project(
         _upsert_project_file(sdk, project_id, existing_paths, model_file_path, model_lkml)
 
     print(f"Configuring LookML model '{model_name}' with connection '{connection_name}'...")
-    existing_models = {m.name for m in sdk.all_lookml_models() if m.name}
     model_body = models40.WriteLookmlModel(
         name=model_name,
         project_name=project_id,
         allowed_db_connection_names=[connection_name],
     )
-    if model_name in existing_models:
+    try:
+        sdk.lookml_model(lookml_model_name=model_name, fields="name")
         sdk.update_lookml_model(lookml_model_name=model_name, body=model_body)
-    else:
+    except Exception:
         sdk.create_lookml_model(body=model_body)
 
     enc_proj = sdk.encode_path_param(project_id)
@@ -293,18 +293,14 @@ def register_action_hub_and_extension(
     print("Enabling action-pptx integration...")
     integration = None
     for attempt in range(6):
-        integration = next(
-            (
-                i
-                for i in sdk.all_integrations(integration_hub_id=hub.id or "")
-                if i.id and i.id.split("::")[-1] == "action-pptx"
-            ),
-            None,
-        )
-        if integration or attempt == 5:
+        try:
+            integration = sdk.integration(integration_id=f"{hub.id}::action-pptx")
             break
-        print(f"Integration not found on hub {hub.id} yet; retrying in 3s ({attempt + 1}/6)...")
-        time.sleep(3)
+        except Exception:
+            if attempt == 5:
+                break
+            print(f"Integration not found on hub {hub.id} yet; retrying in 3s ({attempt + 1}/6)...")
+            time.sleep(3)
 
     if not integration or not integration.id:
         raise RuntimeError("Could not find action-pptx integration on the registered hub.")
