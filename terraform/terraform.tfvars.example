@@ -1,0 +1,11 @@
+project_id = "your-gcp-project-id"
+region     = "us-central1"
+
+# Optional: Custom GCS bucket name (defaults to "<project_id>-action-pptx")
+# gcs_bucket_name = "your-gcp-project-id-action-pptx"
+
+# Optional: Set this after the first apply once you get the service_url output
+# action_hub_base_url = "https://action-pptx-xxxx.a.run.app"
+
+# Optional: Custom container image
+# image = "us-central1-docker.pkg.dev/your-gcp-project-id/action-pptx/action-pptx:latest"
