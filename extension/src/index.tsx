@@ -272,6 +272,7 @@ function createMockHarness(apiBase: string, secret: string, unconfigured: boolea
     : {
         cloudRunUrl: apiBase,
         templatesGcsUri: "gs://fifth-inkwell-452619-v2-action-pptx/templates",
+        outputGcsUri: "gs://fifth-inkwell-452619-v2-action-pptx/output",
         useOAuth: true,
         oauthClientId: "104928374651-shared-action-pptx.apps.googleusercontent.com",
         oauthGcsPassthrough: true,
@@ -282,6 +283,10 @@ function createMockHarness(apiBase: string, secret: string, unconfigured: boolea
     getContextData: () => ctxData,
     saveContextData: async (next: Record<string, any>) => {
       ctxData = next;
+    },
+    clientRouteChanged: (nextRoute: string) => {
+      const target = nextRoute.startsWith("/") ? nextRoute : `/${nextRoute}`;
+      window.history.pushState(null, "", `${target}${window.location.search}`);
     },
     localStorageGetItem: async (k: string) => window.localStorage.getItem(k),
     localStorageSetItem: async (k: string, v: string) => window.localStorage.setItem(k, v),
@@ -401,6 +406,10 @@ function createMockHarness(apiBase: string, secret: string, unconfigured: boolea
             name: "templates_gcs_uri",
             value: "gs://fifth-inkwell-452619-v2-action-pptx/templates",
           },
+          {
+            name: "output_gcs_uri",
+            value: "gs://fifth-inkwell-452619-v2-action-pptx/output",
+          },
         ],
       },
     ],
@@ -430,14 +439,32 @@ async function mount() {
     return;
   }
 
+  let routeListener: ((route: string) => void) | null = null;
+  const onHostRouteChange = (fn: (route: string) => void) => {
+    routeListener = fn;
+    return () => {
+      if (routeListener === fn) routeListener = null;
+    };
+  };
+  let initialRoute = window.location.pathname;
   const extensionSDK = await connectExtensionHost({
     chattyTimeout: -1,
-    hostChangedRoute: (nextRoute) => {
-      window.dispatchEvent(new CustomEvent("looker-route", { detail: nextRoute || "/" }));
+    setInitialRoute: (route: string) => {
+      initialRoute = route || "/";
+    },
+    hostChangedRoute: (route: string) => {
+      routeListener?.(route || "/");
     },
   });
   const core40SDK = LookerExtensionSDK.createClient(extensionSDK);
-  root.render(<App core40SDK={core40SDK} extensionSDK={extensionSDK} />);
+  root.render(
+    <App
+      core40SDK={core40SDK}
+      extensionSDK={extensionSDK}
+      initialRoute={initialRoute}
+      onHostRouteChange={onHostRouteChange}
+    />
+  );
 }
 
 void mount();

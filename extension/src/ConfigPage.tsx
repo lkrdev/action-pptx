@@ -3,6 +3,7 @@ import React, { useEffect, useState } from "react";
 export interface ExtensionConfigData {
   cloudRunUrl: string;
   templatesGcsUri: string;
+  outputGcsUri?: string;
   templatesUserAttributeName?: string;
   useOAuth: boolean;
   oauthClientId?: string;
@@ -138,6 +139,7 @@ export const ConfigPage: React.FC<ConfigPageProps> = ({
   const [cfg, setCfg] = useState<ExtensionConfigData>({
     cloudRunUrl: initialConfig.cloudRunUrl || "",
     templatesGcsUri: initialConfig.templatesGcsUri || "",
+    outputGcsUri: initialConfig.outputGcsUri || "",
     templatesUserAttributeName: initialConfig.templatesUserAttributeName || "",
     useOAuth: Boolean(initialConfig.useOAuth),
     oauthClientId: initialConfig.oauthClientId || "",
@@ -199,6 +201,9 @@ export const ConfigPage: React.FC<ConfigPageProps> = ({
       const tmplParam = Array.isArray(match.params)
         ? match.params.find((p: any) => p.name === "templates_gcs_uri")
         : null;
+      const outParam = Array.isArray(match.params)
+        ? match.params.find((p: any) => p.name === "output_gcs_uri")
+        : null;
       const rawUrl = hubUrlFor(match);
       const discoveredOrigin = rawUrl
         .replace(/\/actions\/pptx\/execute\/?$/, "")
@@ -228,6 +233,7 @@ export const ConfigPage: React.FC<ConfigPageProps> = ({
       patch({
         ...(discoveredOrigin ? { cloudRunUrl: discoveredOrigin } : {}),
         ...(tmplParam?.value ? { templatesGcsUri: String(tmplParam.value) } : {}),
+        ...(outParam?.value ? { outputGcsUri: String(outParam.value) } : {}),
         ...(tmplParam?.user_attribute_name
           ? { templatesUserAttributeName: String(tmplParam.user_attribute_name) }
           : {}),
@@ -268,6 +274,7 @@ export const ConfigPage: React.FC<ConfigPageProps> = ({
       const nextConfig: ExtensionConfigData = {
         cloudRunUrl: cfg.cloudRunUrl.trim().replace(/\/+$/, ""),
         templatesGcsUri: cfg.templatesGcsUri.trim(),
+        outputGcsUri: cfg.outputGcsUri?.trim() || undefined,
         templatesUserAttributeName: cfg.templatesUserAttributeName?.trim() || undefined,
         useOAuth: cfg.useOAuth,
         oauthClientId: cfg.oauthClientId?.trim() || undefined,
@@ -465,6 +472,20 @@ export const ConfigPage: React.FC<ConfigPageProps> = ({
               value={cfg.templatesGcsUri}
               onChange={(e) => patch({ templatesGcsUri: e.target.value })}
               placeholder="gs://my-templates-bucket/templates"
+              style={inputStyle}
+            />
+          </label>
+
+          <label>
+            <div style={{ fontSize: 12, fontWeight: 600, color: "#cbd5e1", marginBottom: 6 }}>
+              Output GCS URI (gs://bucket/prefix — enables Report Viewer)
+            </div>
+            <input
+              id="input-output-gcs-uri"
+              type="text"
+              value={cfg.outputGcsUri || ""}
+              onChange={(e) => patch({ outputGcsUri: e.target.value })}
+              placeholder="gs://my-output-bucket/output"
               style={inputStyle}
             />
           </label>
