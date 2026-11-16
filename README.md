@@ -48,18 +48,100 @@ To view all CLI flags, options, and automated Looker registration parameters, ru
 ./deploy.sh --help
 ```
 
-The script enables required Google Cloud APIs (`run`, `secretmanager`, `storage`, `cloudbuild`, `artifactregistry`), creates or reuses your GCS bucket and uploads `examples/simple_template.pptx`, configures `action-hub-secret` in Secret Manager, deploys `action-pptx` to Cloud Run (Python 3.14), and can optionally register and enable the Action Hub in your Looker instance.
+The wizard enables required Google Cloud APIs (`run`, `secretmanager`, `storage`, `cloudbuild`, `artifactregistry`), creates or reuses your GCS bucket and uploads sample templates from `assets/`, configures `action-hub-secret` in Secret Manager, deploys `action-pptx` to Cloud Run (Python 3.14), and optionally configures Looker end-to-end:
+- **Action Hub & Settings:** Registers/updates the Looker Integration Hub and configures `templates_gcs_uri` and `output_gcs_uri` on `action-pptx`.
+- **Extension Deployment (`--extension-mode new` or `existing`):**
+  - **New LookML Project (`new`):** Lists your Looker database connections and prompts you to choose one, creates a bare-Git LookML project, configures the LookML model + connection, deploys `bundle.js` + `manifest.lkml` to production, and pre-populates the path-scoped hidden `action_hub_secret` user attribute.
+  - **Existing LookML Project (`existing`):** Prints the ready-to-paste `application: action_pptx_template_manager { ... }` block with your deployed Cloud Run URL pre-filled in `external_api_urls`.
 
 ---
 
-## Example LookML & Sample Template
+## Configuration & Authentication Modes
 
-- **Sample 3-Slide Widescreen Template:** [`examples/simple_template.pptx`](examples/simple_template.pptx)
-- **Example LookML Project (`action_pptx`):** [`examples/lookml/`](examples/lookml/) queries `bigquery-public-data.thelook_ecommerce.inventory_items` over the `looker-private-demo` connection and provides the 9-tile `executive_business_review` dashboard matching `examples/simple_template.pptx`:
+`action-pptx` supports both **Service Account** and **Google OAuth** authentication from the same container based on your environment variables:
+
+| Environment Variable | Default | Description |
+| :--- | :--- | :--- |
+| `ACTION_HUB_SECRET` | *(Required)* | Shared secret verifying Looker Action Hub webhooks (accepts raw secret or `<nonce>/<hmac-sha512>`) and Extension `serverProxy` calls. |
+| `PUBLIC_BASE_URL` | `http://localhost:8080` | Public HTTPS origin of your Cloud Run service (e.g. `https://action-pptx-xyz.a.run.app`). |
+| `ACTION_HUB_LABEL` | `Looker PowerPoint Action Hub` | Group heading shown in **Looker → Admin → Actions**. |
+| `ACTION_LABEL` | `PowerPoint Template Merge (action-pptx)` | Action destination name shown in Looker's Schedule/Send modal and Admin Actions list. |
+| `REQUIRED_USER_ATTRIBUTE` | `""` *(disabled)* | Looker User Attribute name (e.g. `can_use_action_pptx`) bound to a `required: true`, `sensitive: true` Action Hub parameter to restrict who can see and execute the action. |
+| `RESTRICT_BY_USER_ATTRIBUTE` | `false` | Shorthand boolean (`true`/`false`); when `true` and `REQUIRED_USER_ATTRIBUTE` is unset, defaults to `can_use_action_pptx`. |
+| `ALLOWED_GCS_BUCKETS` | `""` *(any bucket)* | Comma-separated allowlist of permitted GCS bucket names (e.g. `my-templates-bucket,my-output-bucket`). |
+| `GOOGLE_OAUTH_CLIENT_ID` | `""` *(disabled)* | Google Web OAuth 2.0 Client ID. Leaving this unset runs in **Service Account (no OAuth)** mode; setting it enables **Google OAuth** mode across the Action and Extension. |
+| `GOOGLE_OAUTH_CLIENT_SECRET` | `""` | Google Web OAuth 2.0 Client Secret used to exchange authorization codes for offline `refresh_token`s on scheduled deliveries. |
+| `OAUTH_GCS_PASSTHROUGH` | `false` | `true` reads/writes GCS as the signed-in Google user (`devstorage.read_write`); `false` uses the Cloud Run Service Account. |
+| `ALLOWED_OAUTH_DOMAINS` | `""` *(any verified email)* | Optional comma-separated Google Workspace domain allowlist (e.g. `yourcompany.com`) when OAuth is enabled. |
+| `ENCRYPT_PAYLOAD` | `false` | Set `true` to encrypt OAuth token state returned to Looker using `CIPHER_MASTER` (defaults to `ACTION_HUB_SECRET`). |
+
+### Mode 1: Service Account Only (Default — No User OAuth)
+Cloud Run accesses GCS via its attached Service Account (`roles/storage.objectAdmin`), and Looker authenticates via `ACTION_HUB_SECRET`. End users never see a Google sign-in prompt in Schedules or the Extension (`useOAuth: false`).
+
+```ini
+ACTION_HUB_SECRET=your-64-char-hex-secret
+PUBLIC_BASE_URL=https://action-pptx-xyz-uc.a.run.app
+ACTION_HUB_LABEL=Looker PowerPoint Action Hub
+ACTION_LABEL=PowerPoint Slides
+ALLOWED_GCS_BUCKETS=my-project-action-pptx
+```
+
+### Mode 2: Google OAuth + Per-User GCS Passthrough
+Users sign in once with Google (storing an offline refresh token for unattended schedules), and GCS reads/writes run under each user's own Google IAM permissions (`devstorage.read_write`). Can share a single Web OAuth 2.0 Client ID between the Action and Extension.
+
+```ini
+ACTION_HUB_SECRET=your-64-char-hex-secret
+PUBLIC_BASE_URL=https://action-pptx-xyz-uc.a.run.app
+ACTION_HUB_LABEL=Looker PowerPoint Action Hub
+ACTION_LABEL=PowerPoint Slides
+ALLOWED_GCS_BUCKETS=my-project-action-pptx
+GOOGLE_OAUTH_CLIENT_ID=1234567890-abc.apps.googleusercontent.com
+GOOGLE_OAUTH_CLIENT_SECRET=GOCSPX-your-oauth-client-secret
+OAUTH_GCS_PASSTHROUGH=true
+ALLOWED_OAUTH_DOMAINS=yourcompany.com
+ENCRYPT_PAYLOAD=true
+```
+
+### Mode 3: Hybrid (Google OAuth Sign-In + Service Account GCS)
+Users authenticate with Google OAuth (`openid email` only — handy when `serverProxy` is unavailable on private-IP Looker instances), while Cloud Run still reads/writes GCS through its central Service Account so individual users do not need GCS bucket IAM grants.
+
+```ini
+ACTION_HUB_SECRET=your-64-char-hex-secret
+PUBLIC_BASE_URL=https://action-pptx-xyz-uc.a.run.app
+ACTION_LABEL=PowerPoint Slides
+ALLOWED_GCS_BUCKETS=my-project-action-pptx
+GOOGLE_OAUTH_CLIENT_ID=1234567890-abc.apps.googleusercontent.com
+GOOGLE_OAUTH_CLIENT_SECRET=GOCSPX-your-oauth-client-secret
+OAUTH_GCS_PASSTHROUGH=false
+ALLOWED_OAUTH_DOMAINS=yourcompany.com
+ENCRYPT_PAYLOAD=true
+```
+
+### Restricting Action Access to Specific Users or Groups (User Attribute Gate)
+Looker does not provide a native per-user/per-group toggle in **Admin → Platform → Actions**. Setting `REQUIRED_USER_ATTRIBUTE=can_use_action_pptx` (or `RESTRICT_BY_USER_ATTRIBUTE=true`) adds a `required: true`, `sensitive: true` parameter bound to that Looker User Attribute (`user_attribute_name`) and enforces it on `/form` and `/execute`:
+
+```ini
+REQUIRED_USER_ATTRIBUTE=can_use_action_pptx
+```
+
+When enabled, configure the matching attribute in **Looker → Admin → Users → User Attributes**:
+1. **Name:** `can_use_action_pptx` (or the value set in `REQUIRED_USER_ATTRIBUTE`), **Data Type:** `String (advanced)`.
+2. **Default Value:** Leave **unset (`null`)** — never set an empty string `""`, which Looker treats as populated.
+3. **User Access:** Set to **None** or **View** so unauthorized users cannot populate it themselves.
+4. **Hide Values:** Keep set to **No** (Looker encrypts hidden user attributes into ciphertext on Action Hub webhooks; `sensitive: true` on the Action Hub parameter masks the field in the Admin UI instead).
+5. Assign a non-null value (e.g. `yes`) on the **Group Values** or **User Values** tab only for users/groups who should see and execute the action. Non-admin users without a value will not see the action in the Send/Schedule modal, and direct/scheduled executions without a value are rejected.
+
+---
+
+## Sample Templates & Example LookML (`assets/`)
+
+- **Executive Business Review Template (3 slides):** [`assets/simple_template.pptx`](assets/simple_template.pptx)
+- **Looker Embed Demo (`embed_demo::brand_overview`) Template:** [`assets/embed_demo_template.pptx`](assets/embed_demo_template.pptx)
+- **Example LookML Project (`action-pptx`):** [`assets/lookml/`](assets/lookml/) queries `bigquery-public-data.thelook_ecommerce.inventory_items` over the `looker-private-demo` connection and provides the 9-tile `executive_business_review` dashboard matching `assets/simple_template.pptx`:
 
 ```bash
 # Push and deploy the example LookML project to Looker
-lkr tools lookml push examples/lookml --project-id=action_pptx --deploy
+lkr tools lookml push assets/lookml --project-id=action-pptx --deploy
 ```
 
 ---
@@ -79,9 +161,9 @@ make server   # terminal 1
 make tunnel   # terminal 2
 
 # Standalone CLI (inspect, validate, merge)
-uv run pptx-merge inspect examples/simple_template.pptx
-uv run pptx-merge validate examples/simple_template.pptx --csv-zip examples/sample_looker_export.zip
-uv run pptx-merge merge examples/simple_template.pptx --csv-zip examples/sample_looker_export.zip -o examples/merged_output.pptx
+uv run pptx-merge inspect assets/simple_template.pptx
+uv run pptx-merge validate assets/simple_template.pptx --csv-zip assets/sample_looker_export.zip
+uv run pptx-merge merge assets/simple_template.pptx --csv-zip assets/sample_looker_export.zip -o assets/merged_output.pptx
 ```
 
 ---
@@ -100,6 +182,7 @@ application: action_pptx_template_manager {
   entitlements: {
     core_api_methods: [
       "me",
+      "all_dashboards",
       "search_dashboards",
       "dashboard",
       "lookml_model_explore",
@@ -110,14 +193,16 @@ application: action_pptx_template_manager {
       "all_integrations",
       "all_user_attributes",
       "create_user_attribute",
-      "set_user_attribute_group_values"
+      "delete_user_attribute",
+      "all_themes",
+      "all_color_collections"
     ]
-    scoped_user_attributes: ["action_hub_secret"]
+    global_user_attributes: ["brand"]
     external_api_urls: [
-      "https://*.a.run.app",
-      "https://*.trycloudflare.com",
-      "https://oauth2.googleapis.com"
+      # Replace with your deployed Cloud Run URL:
+      "https://*.a.run.app"
     ]
+    # only required for OAuth2 use in the Action and Extension
     oauth2_urls: [
       "https://accounts.google.com/o/oauth2/v2/auth",
       "https://oauth2.googleapis.com/token"

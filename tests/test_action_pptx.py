@@ -28,11 +28,15 @@ def _make_hmac_token(secret: str, nonce: str = "abc123nonce") -> str:
 
 
 @pytest.mark.asyncio
-async def test_healthz_and_auth_enforcement(action_env: str) -> None:
+async def test_healthz_and_auth_enforcement(
+    action_env: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ACTION_HUB_LABEL", "Custom Slides Hub")
+    monkeypatch.setenv("ACTION_LABEL", "PowerPoint Slides")
     app = create_app()
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        r_health = await client.get("/healthz")
+        r_health = await client.get("/health")
         assert r_health.status_code == 200
         assert r_health.json()["looker"]["success"] is True
 
@@ -44,7 +48,9 @@ async def test_healthz_and_auth_enforcement(action_env: str) -> None:
         r_raw = await client.post("/", headers={"Authorization": f'Token token="{action_env}"'})
         assert r_raw.status_code == 200
         data = r_raw.json()
+        assert data["label"] == "Custom Slides Hub"
         assert data["integrations"][0]["name"] == "action-pptx"
+        assert data["integrations"][0]["label"] == "PowerPoint Slides"
         assert data["integrations"][0]["icon_data_uri"].startswith("data:image/svg+xml;base64,")
         assert data["integrations"][0]["supported_formats"] == ["csv_zip"]
         assert data["integrations"][0]["supported_formattings"] == ["unformatted"]
@@ -109,6 +115,98 @@ async def test_action_form_lists_gcs_templates_and_checks_buckets(
         )
         assert r_bad_bucket.status_code == 200
         assert "not in ALLOWED_GCS_BUCKETS" in r_bad_bucket.json()["error"]
+
+
+@pytest.mark.asyncio
+async def test_required_user_attribute_restriction(
+    action_env: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("RESTRICT_BY_USER_ATTRIBUTE", "true")
+    monkeypatch.setattr(
+        gcs,
+        "list_pptx_templates",
+        lambda uri, allowed, oauth_token=None: ["executive_summary.pptx"],
+    )
+    app = create_app()
+    transport = ASGITransport(app=app)
+    headers = {"Authorization": f'Token token="{action_env}"'}
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        # 1. Action definition exposes required, sensitive user_attribute_name param
+        r_meta = await client.post("/actions/pptx", headers=headers)
+        assert r_meta.status_code == 200
+        access_params = [p for p in r_meta.json()["params"] if p["name"] == "action_access_param"]
+        assert access_params == [
+            {
+                "name": "action_access_param",
+                "label": "Action Access",
+                "description": "Controls which users can access this action.",
+                "user_attribute_name": "can_use_action_pptx",
+                "required": True,
+                "sensitive": True,
+            }
+        ]
+
+        # 2. Custom attribute name via REQUIRED_USER_ATTRIBUTE overrides default
+        monkeypatch.setenv("REQUIRED_USER_ATTRIBUTE", "pptx_allowed")
+        r_custom = await client.post("/actions/pptx", headers=headers)
+        assert r_custom.json()["params"][-1]["user_attribute_name"] == "pptx_allowed"
+
+        # 3. Looker Admin 'test': True check on /form still succeeds before user assignment
+        r_admin_test = await client.post(
+            "/actions/pptx/form",
+            headers=headers,
+            json={
+                "data": {
+                    "templates_gcs_uri": "gs://templates-bucket/team-a",
+                    "output_gcs_uri": "gs://packages-bucket/out",
+                    "test": True,
+                }
+            },
+        )
+        assert "fields" in r_admin_test.json()
+
+        # 4. Unauthorized user without action_access_param is denied on /form and /execute
+        r_denied_form = await client.post(
+            "/actions/pptx/form",
+            headers=headers,
+            json={
+                "data": {
+                    "templates_gcs_uri": "gs://templates-bucket/team-a",
+                    "output_gcs_uri": "gs://packages-bucket/out",
+                }
+            },
+        )
+        assert "Access denied" in r_denied_form.json()["error"]
+
+        r_denied_exec = await client.post(
+            "/actions/pptx/execute",
+            headers=headers,
+            json={
+                "type": "dashboard",
+                "data": {
+                    "templates_gcs_uri": "gs://templates-bucket/team-a",
+                    "output_gcs_uri": "gs://packages-bucket/out",
+                },
+                "form_params": {"template": "executive_summary.pptx"},
+            },
+        )
+        assert r_denied_exec.json()["looker"]["success"] is False
+        assert "Access denied" in r_denied_exec.json()["looker"]["message"]
+
+        # 5. Authorized user with populated action_access_param succeeds on /form
+        r_allowed = await client.post(
+            "/actions/pptx/form",
+            headers=headers,
+            json={
+                "data": {
+                    "templates_gcs_uri": "gs://templates-bucket/team-a",
+                    "output_gcs_uri": "gs://packages-bucket/out",
+                    "action_access_param": "yes",
+                }
+            },
+        )
+        assert r_allowed.json()["fields"][0]["name"] == "template"
 
 
 @pytest.mark.asyncio
@@ -562,3 +660,85 @@ def test_gcs_helpers_and_config_edge_cases(monkeypatch: pytest.MonkeyPatch) -> N
         verify_oauth_bearer("Bearer tok", frozenset({"google.com"}))
 
     log_structured("test_event", trace_header="105445aa7843bc8bf206b12000100000/1;o=1", ok=True)
+
+
+def test_looker_palette_preview_and_deploy_manifest_helpers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from bin.register_integration import (
+        build_manifest_application_block,
+        build_secret_domain_allowlist,
+    )
+    from pptx_merge.themes import theme_from_looker_palette
+
+    assert build_secret_domain_allowlist("https://www.lkr.dev/apps/action-pptx/") == (
+        "https://www.lkr.dev/apps/action-pptx,"
+        "https://www.lkr.dev/apps/action-pptx/,"
+        "https://www.lkr.dev/apps/action-pptx/*"
+    )
+
+    existing_block = build_manifest_application_block(
+        "https://www.lkr.dev/apps/action-pptx", use_local_bundle=False
+    )
+    assert 'url: "https://cdn.lkr.dev/apps/action-pptx/latest/bundle.js"' in existing_block
+    assert '"https://www.lkr.dev/apps/action-pptx/*"' in existing_block
+    assert '"all_themes"' in existing_block
+
+    new_proj_block = build_manifest_application_block(
+        "https://www.lkr.dev/apps/action-pptx", use_local_bundle=True
+    )
+    assert 'file: "bundle.js"' in new_proj_block
+
+    custom_theme = theme_from_looker_palette(
+        "Shipping_Light",
+        {
+            "bg_color": "#f6f8fa",
+            "card_bg": "#ffffff",
+            "title_color": "#3a4245",
+            "text_color": "#3a4245",
+            "accent": "#1f78b4",
+            "series_colors": ["#d19", "#d18a", "#059669"],
+        },
+    )
+    assert custom_theme.mode == "light"
+    assert custom_theme.series_palette[0] == "DD1199"
+    assert custom_theme.series_palette[1] == "DD1188"
+
+    monkeypatch.setenv("ACTION_HUB_SECRET", "test-secret")
+    import base64
+    import io
+    import zipfile
+
+    from fastapi.testclient import TestClient
+
+    from action_pptx.app import create_app
+    from tests.conftest import build_showcase_csv_zip_bytes, build_showcase_template_bytes
+
+    tmpl_b64 = base64.b64encode(build_showcase_template_bytes()).decode("ascii")
+    csv_map: dict[str, str] = {}
+    with zipfile.ZipFile(io.BytesIO(build_showcase_csv_zip_bytes())) as zf:
+        for name in zf.namelist():
+            if name.endswith(".csv"):
+                csv_map[name.removesuffix(".csv")] = zf.read(name).decode("utf-8")
+
+    client = TestClient(create_app())
+    resp = client.post(
+        "/templates/preview",
+        headers={"Authorization": 'Token token="test-secret"'},
+        json={
+            "pptx_base64": tmpl_b64,
+            "tile_csvs": csv_map,
+            "plan_title": "Palette Test",
+            "theme": "Shipping_Light",
+            "theme_palette": {
+                "bg_color": "#f6f8fa",
+                "card_bg": "#ffffff",
+                "title_color": "#0f172a",
+                "text_color": "#334155",
+                "accent": "#1f78b4",
+                "series_colors": ["#d19", "#1f78b4", "#059669"],
+            },
+        },
+    )
+    assert resp.status_code == 200
+    assert len(resp.json()["pptx_base64"]) > 1000

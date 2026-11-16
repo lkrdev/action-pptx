@@ -1,6 +1,17 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { init as initPptxPreview } from "pptx-preview";
-import { ConfigPage, ExtensionConfigData, Svg } from "./ConfigPage";
+import { ConfigPage, copyToClipboardSafe, ExtensionConfigData, Svg } from "./ConfigPage";
+import {
+  DashboardPicker,
+  DashboardSummary,
+  FALLBACK_LOOKER_THEMES,
+  hexLuminance,
+  loadLookerThemeOptions,
+  LookerThemeOption,
+  LookerThemePicker,
+  TEMPLATE_ORIGINAL_THEME,
+  useDismissOnOutsideOrEscape,
+} from "./DashboardPicker";
 import {
   DashboardTileSchema,
   fetchDashboardTileCsvs,
@@ -13,7 +24,6 @@ interface AppProps {
 }
 
 export const OAUTH_STORAGE_KEY = "action_pptx_oauth_session";
-export const BRAND_OPTIONS = ["Levi's", "Calvin Klein", "Columbia", "Allegra K", "Default"] as const;
 
 export function getEmbedThemeName(isDark: boolean, brand?: string): string {
   const suffix = isDark ? "Dark" : "Light";
@@ -38,16 +48,12 @@ interface UiPalette {
   canvasBg: string;
 }
 
-function getUiPalette(brand: string, isDark: boolean): UiPalette {
-  const brandAccents: Record<string, { dark: string; light: string }> = {
-    "Levi's": { dark: "#e11d48", light: "#c41230" },
-    "Calvin Klein": { dark: "#94a3b8", light: "#334155" },
-    Columbia: { dark: "#00a896", light: "#0066b2" },
-    "Allegra K": { dark: "#f43f5e", light: "#be123c" },
-    Default: { dark: "#38bdf8", light: "#0b57d0" },
-  };
-  const pair = brandAccents[brand] || brandAccents.Default;
-  const accent = isDark ? pair.dark : pair.light;
+function getUiPalette(accentHex: string | undefined, isDark: boolean): UiPalette {
+  let accent = accentHex || (isDark ? "#38bdf8" : "#0b57d0");
+  const rawLum = hexLuminance(accent);
+  if (isDark && rawLum < 35) accent = "#f8fafc";
+  if (!isDark && rawLum > 215) accent = "#0f172a";
+  const accentContrast = hexLuminance(accent) > 145 ? "#0f172a" : "#ffffff";
 
   if (isDark) {
     return {
@@ -59,7 +65,7 @@ function getUiPalette(brand: string, isDark: boolean): UiPalette {
       textSecondary: "#e2e8f0",
       textMuted: "#94a3b8",
       accent,
-      accentContrast: "#ffffff",
+      accentContrast,
       canvasBg: "#090d16",
     };
   }
@@ -72,46 +78,85 @@ function getUiPalette(brand: string, isDark: boolean): UiPalette {
     textSecondary: "#334155",
     textMuted: "#475569",
     accent,
-    accentContrast: "#ffffff",
+    accentContrast,
     canvasBg: "#e2e8f0",
   };
 }
 
-const IconSlides: React.FC<{ size?: number }> = ({ size = 24 }) => (
-  <Svg size={size}>
-    <rect x="2" y="3" width="20" height="14" rx="2" />
-    <path d="M8 21h8m-4-4v4M7 12V8m5 4v-2m5 2V6" />
-  </Svg>
+/** Option 1 (Fluent Slide Deck) SVG Logo matching the Looker Action Hub icon */
+const ActionPptxDeckLogo: React.FC<{ size?: number; pulse?: boolean }> = ({
+  size = 28,
+  pulse = false,
+}) => (
+  <svg
+    width={size}
+    height={size}
+    viewBox="0 0 64 64"
+    fill="none"
+    aria-hidden="true"
+    style={
+      pulse
+        ? {
+            animation: "actionPptxPulse 1.15s ease-in-out infinite",
+            filter: "drop-shadow(0 8px 20px rgba(217, 79, 43, 0.42))",
+          }
+        : undefined
+    }
+  >
+    <defs>
+      <linearGradient id="apBgGrad" x1="6" y1="6" x2="58" y2="58" gradientUnits="userSpaceOnUse">
+        <stop offset="0%" stopColor="#FF7A4D" />
+        <stop offset="52%" stopColor="#D94F2B" />
+        <stop offset="100%" stopColor="#A62C14" />
+      </linearGradient>
+    </defs>
+    <rect x="4" y="4" width="56" height="56" rx="14" fill="url(#apBgGrad)" />
+    <rect
+      x="17"
+      y="13"
+      width="35"
+      height="24"
+      rx="4"
+      fill="#FFFFFF"
+      fillOpacity="0.24"
+      transform="rotate(4 34 25)"
+    />
+    <rect x="11" y="18" width="38" height="27" rx="4.5" fill="#FFFFFF" />
+    <rect x="16" y="23" width="16" height="3" rx="1.5" fill="#D94F2B" />
+    <rect x="17" y="34" width="5" height="7" rx="1.2" fill="#F59E0B" />
+    <rect x="25" y="30" width="5" height="11" rx="1.2" fill="#D94F2B" />
+    <rect x="33" y="26" width="5" height="15" rx="1.2" fill="#10B981" />
+    <circle cx="48" cy="45" r="9.5" fill="#0F172A" />
+    <path
+      d="M44.5 45.2L47 47.7L52 42.5"
+      stroke="#38BDF8"
+      strokeWidth="2.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  </svg>
 );
+
 const IconGoogle = () => (
   <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
     <path d="M21.8 12.2c0-.7-.1-1.4-.2-2H12v3.8h5.5a4.7 4.7 0 0 1-2 3.1v2.6h3.3c1.9-1.8 3-4.4 3-7.5ZM12 22c2.7 0 5-.9 6.7-2.4l-3.3-2.6c-.9.6-2.1 1-3.4 1-2.6 0-4.8-1.8-5.6-4.1H3v2.6A10 10 0 0 0 12 22ZM6.4 13.9a6 6 0 0 1 0-3.8V7.5H3a10 10 0 0 0 0 9l3.4-2.6ZM12 5.9c1.5 0 2.8.5 3.8 1.5l2.9-2.9A10 10 0 0 0 3 7.5l3.4 2.6c.8-2.3 3-4.2 5.6-4.2Z" />
   </svg>
 );
 const IconCheckCircle = () => (
-  <Svg size={14}>
+  <Svg size={16}>
     <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
     <path d="m9 11 3 3L22 4" />
   </Svg>
 );
-const IconAlert = () => (
-  <Svg size={14}>
+const IconXCircle = () => (
+  <Svg size={16}>
     <circle cx="12" cy="12" r="10" />
-    <path d="M12 8v4m0 4h.01" />
+    <path d="m15 9-6 6M9 9l6 6" />
   </Svg>
 );
 const IconLogOut = () => (
   <Svg size={14}>
     <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4m7 14 5-5-5-5m5 5H9" />
-  </Svg>
-);
-const IconPalette = () => (
-  <Svg size={14}>
-    <circle cx="13.5" cy="6.5" r=".5" fill="currentColor" />
-    <circle cx="17.5" cy="10.5" r=".5" fill="currentColor" />
-    <circle cx="8.5" cy="7.5" r=".5" fill="currentColor" />
-    <circle cx="6.5" cy="12.5" r=".5" fill="currentColor" />
-    <path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.93 0 1.65-.75 1.65-1.69 0-.43-.18-.83-.44-1.12-.29-.29-.44-.65-.44-1.13a1.64 1.64 0 0 1 1.67-1.67h1.99c3.05 0 5.55-2.5 5.55-5.55C21.97 6.01 17.46 2 12 2Z" />
   </Svg>
 );
 const IconSun = () => (
@@ -146,8 +191,19 @@ const IconUpload = () => (
   </Svg>
 );
 const IconClose = () => (
-  <Svg>
+  <Svg size={14}>
     <path d="M18 6 6 18M6 6l12 12" />
+  </Svg>
+);
+const IconExternal = () => (
+  <Svg size={13}>
+    <path d="M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+  </Svg>
+);
+const IconCopy = () => (
+  <Svg size={13}>
+    <rect x="9" y="9" width="13" height="13" rx="2" />
+    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
   </Svg>
 );
 const IconArrowLeft = () => (
@@ -195,11 +251,6 @@ function parseStoredOAuthSession(
 function persistOAuthSession(extensionSDK: any, session: StoredOAuthSession): void {
   const serialized = JSON.stringify(session);
   try {
-    window.localStorage?.setItem(OAUTH_STORAGE_KEY, serialized);
-  } catch {
-    // ignore storage errors
-  }
-  try {
     void extensionSDK?.localStorageSetItem?.(OAUTH_STORAGE_KEY, serialized);
   } catch {
     // ignore extension storage errors
@@ -207,11 +258,6 @@ function persistOAuthSession(extensionSDK: any, session: StoredOAuthSession): vo
 }
 
 function clearOAuthSession(extensionSDK: any): void {
-  try {
-    window.localStorage?.removeItem(OAUTH_STORAGE_KEY);
-  } catch {
-    // ignore
-  }
   try {
     void extensionSDK?.localStorageRemoveItem?.(OAUTH_STORAGE_KEY);
     void extensionSDK?.localStorageSetItem?.(OAUTH_STORAGE_KEY, "");
@@ -272,6 +318,8 @@ function base64ToArrayBuffer(b64: string): ArrayBuffer {
 
 export const App: React.FC<AppProps> = ({ core40SDK, extensionSDK }) => {
   const [route, setRoute] = useState<string>(() => {
+    const hostRoute = String(extensionSDK?.lookerHostData?.route || "").trim();
+    if (hostRoute && hostRoute !== "/") return hostRoute;
     const hash = window.location.hash.replace(/^#/, "");
     if (hash) return hash;
     return window.location.pathname.endsWith("/config") ? "/config" : "/";
@@ -287,83 +335,98 @@ export const App: React.FC<AppProps> = ({ core40SDK, extensionSDK }) => {
       oauthGcsPassthrough: ctx?.oauthGcsPassthrough ?? true,
     };
   });
-  const [brand, setBrand] = useState<string>("Levi's");
+
+  const [lookerThemes, setLookerThemes] = useState<LookerThemeOption[]>(FALLBACK_LOOKER_THEMES);
+  const [selectedThemeName, setSelectedThemeName] = useState<string>("Levis_Dark");
   const [isDark, setIsDark] = useState<boolean>(true);
-  const [dashboards, setDashboards] = useState<Array<{ id: string; title: string }>>([]);
+
   const [selectedDashboardId, setSelectedDashboardId] = useState<string>("");
+  const [selectedDashboardTitle, setSelectedDashboardTitle] = useState<string>("");
   const [tiles, setTiles] = useState<DashboardTileSchema[]>([]);
+
   const [fileName, setFileName] = useState<string>("");
   const [pptxBase64, setPptxBase64] = useState<string>("");
+  const [templateFingerprint, setTemplateFingerprint] = useState<string>("");
+
   const [report, setReport] = useState<any>(null);
+  const [actionError, setActionError] = useState<string>("");
+  const [savedNotice, setSavedNotice] = useState<string>("");
+  const [busyLabel, setBusyLabel] = useState<string>("");
+  const [checkPopoverOpen, setCheckPopoverOpen] = useState<boolean>(false);
+  const [copiedErrors, setCopiedErrors] = useState<boolean>(false);
+
   const [mergedPptxBase64, setMergedPptxBase64] = useState<string>("");
+  const [previewLoading, setPreviewLoading] = useState<boolean>(false);
+  const [previewLoadingLabel, setPreviewLoadingLabel] = useState<string>("");
   const [currentSlide, setCurrentSlide] = useState<number>(0);
   const [totalSlides, setTotalSlides] = useState<number>(0);
-  const [status, setStatus] = useState<string>("");
+
   const [oauthToken, setOauthToken] = useState<string>("");
   const [oauthSigningIn, setOauthSigningIn] = useState<boolean>(false);
+
   const previewContainerRef = useRef<HTMLDivElement | null>(null);
   const previewerRef = useRef<any>(null);
   const desiredSlideRef = useRef<number>(0);
+  const checkPopoverRef = useRef<HTMLDivElement | null>(null);
 
-  const ui = getUiPalette(brand, isDark);
-  const activeEmbedTheme = getEmbedThemeName(isDark, brand);
+  // Monotonic sequence guard + SWR-style in-memory caches for instant/race-safe theme switching
+  const previewSeqRef = useRef<number>(0);
+  const tileCsvCacheRef = useRef<Map<string, Record<string, string>>>(new Map());
+  const previewPptxCacheRef = useRef<Map<string, string>>(new Map());
+
+  const activeThemeOption = useMemo(
+    () =>
+      lookerThemes.find((t) => t.name === selectedThemeName) ||
+      lookerThemes[1] ||
+      FALLBACK_LOOKER_THEMES[1],
+    [lookerThemes, selectedThemeName]
+  );
+
+  const ui = getUiPalette(activeThemeOption?.palette?.accent, isDark);
 
   useEffect(() => {
     const initialClientId = config.oauthClientId || "";
-    const localSession = parseStoredOAuthSession(
-      window.localStorage?.getItem(OAUTH_STORAGE_KEY),
-      initialClientId
-    );
-    if (localSession?.token) {
-      setOauthToken(localSession.token);
-    } else {
-      void Promise.resolve(extensionSDK?.localStorageGetItem?.(OAUTH_STORAGE_KEY))
-        .then((extRaw: string | null) => {
-          const extSession = parseStoredOAuthSession(extRaw, initialClientId);
-          if (extSession?.token) setOauthToken(extSession.token);
-        })
-        .catch(() => {});
-    }
-
-    // Automatically detect user's Looker `brand` user attribute (like looker-embed-demo)
-    void Promise.resolve(extensionSDK?.userAttributeGetItem?.("brand"))
-      .then((attrBrand: string | null) => {
-        const cleaned = (attrBrand || "").trim();
-        if (cleaned && BRAND_OPTIONS.includes(cleaned as any)) {
-          setBrand(cleaned);
-        }
+    void Promise.resolve(extensionSDK?.localStorageGetItem?.(OAUTH_STORAGE_KEY))
+      .then((extRaw: string | null) => {
+        const extSession = parseStoredOAuthSession(extRaw, initialClientId);
+        if (extSession?.token) setOauthToken(extSession.token);
       })
       .catch(() => {});
 
-    const onStorage = (e: StorageEvent) => {
-      if (e.key && e.key !== OAUTH_STORAGE_KEY) return;
-      const next = parseStoredOAuthSession(e.newValue, initialClientId);
-      setOauthToken(next?.token || "");
-    };
+    void Promise.all([
+      loadLookerThemeOptions(core40SDK),
+      Promise.resolve(extensionSDK?.userAttributeGetItem?.("brand")).catch(() => null),
+    ]).then(([loadedThemes, attrBrand]) => {
+      setLookerThemes(loadedThemes);
+      const preferred = getEmbedThemeName(true, String(attrBrand || ""));
+      const match =
+        loadedThemes.find((t) => t.name.toLowerCase() === preferred.toLowerCase()) ||
+        loadedThemes.find((t) => t.name === "Embed_Demo_Dark") ||
+        loadedThemes.find((t) => t.name !== TEMPLATE_ORIGINAL_THEME);
+      if (match) {
+        setSelectedThemeName(match.name);
+        setIsDark(match.isDark);
+      }
+    });
+
     const onHashChange = () => {
       setRoute(window.location.hash.replace(/^#/, "") || "/");
     };
-    window.addEventListener("storage", onStorage);
+    const onLookerRoute = (e: Event) => {
+      const next = String((e as CustomEvent).detail || "/").trim() || "/";
+      setRoute(next);
+    };
     window.addEventListener("hashchange", onHashChange);
-
-    void (async () => {
-      try {
-        const list = await core40SDK.ok(core40SDK.search_dashboards({ limit: 200 }));
-        setDashboards(
-          (Array.isArray(list) ? list : [])
-            .filter((d: any) => d?.id && d?.title)
-            .map((d: any) => ({ id: String(d.id), title: String(d.title) }))
-        );
-      } catch (err: any) {
-        setStatus(`Could not load dashboards: ${err?.message || err}`);
-      }
-    })();
+    window.addEventListener("looker-route", onLookerRoute);
 
     return () => {
-      window.removeEventListener("storage", onStorage);
       window.removeEventListener("hashchange", onHashChange);
+      window.removeEventListener("looker-route", onLookerRoute);
     };
   }, []);
+
+  // Sticky check/error popover: stays open until user clicks outside or presses Escape
+  useDismissOnOutsideOrEscape(checkPopoverOpen, checkPopoverRef, () => setCheckPopoverOpen(false));
 
   useEffect(() => {
     if (!mergedPptxBase64 || !previewContainerRef.current) return;
@@ -393,11 +456,13 @@ export const App: React.FC<AppProps> = ({ core40SDK, extensionSDK }) => {
   }
 
   function handleEndPreview() {
+    previewSeqRef.current += 1;
     if (previewerRef.current?.destroy) {
       previewerRef.current.destroy();
     }
     previewerRef.current = null;
     desiredSlideRef.current = 0;
+    setPreviewLoading(false);
     setMergedPptxBase64("");
     setCurrentSlide(0);
     setTotalSlides(0);
@@ -409,7 +474,7 @@ export const App: React.FC<AppProps> = ({ core40SDK, extensionSDK }) => {
       throw new Error("OAuth Client ID is not configured.");
     }
     setOauthSigningIn(true);
-    setStatus("");
+    setActionError("");
     try {
       const token = await loginWithGoogleOAuth(
         extensionSDK,
@@ -417,10 +482,9 @@ export const App: React.FC<AppProps> = ({ core40SDK, extensionSDK }) => {
         config.oauthGcsPassthrough !== false
       );
       setOauthToken(token);
-      setStatus("");
       return token;
     } catch (err: any) {
-      setStatus(`Sign-in failed: ${err?.message || err}`);
+      setActionError(`Sign-in failed: ${err?.message || err}`);
       throw err;
     } finally {
       setOauthSigningIn(false);
@@ -430,33 +494,44 @@ export const App: React.FC<AppProps> = ({ core40SDK, extensionSDK }) => {
   function handleOAuthLogout() {
     clearOAuthSession(extensionSDK);
     setOauthToken("");
-    setStatus("");
+    setActionError("");
   }
 
-  async function handleSelectDashboard(dashId: string) {
+  async function handleSelectDashboard(dashId: string, summary?: DashboardSummary) {
     setSelectedDashboardId(dashId);
+    setSelectedDashboardTitle(summary?.title || dashId);
     setReport(null);
+    setActionError("");
+    setSavedNotice("");
+    setCheckPopoverOpen(false);
     handleEndPreview();
     if (!dashId) {
       setTiles([]);
       return;
     }
-    setStatus("Loading dashboard tiles...");
+    setBusyLabel("Loading tiles...");
     try {
       const schema = await fetchDashboardTileSchemas(core40SDK, dashId);
       setTiles(schema);
-      setStatus("");
     } catch (err: any) {
-      setStatus(`Could not load dashboard tiles: ${err?.message || err}`);
+      setActionError(`Could not load dashboard tiles: ${err?.message || err}`);
+      setCheckPopoverOpen(true);
+    } finally {
+      setBusyLabel("");
     }
   }
 
   async function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
+    const b64 = await readFileAsBase64(file);
     setFileName(file.name);
-    setPptxBase64(await readFileAsBase64(file));
+    setPptxBase64(b64);
+    setTemplateFingerprint(`${file.name}:${file.size}:${file.lastModified}:${b64.slice(-32)}`);
     setReport(null);
+    setActionError("");
+    setSavedNotice("");
+    setCheckPopoverOpen(false);
     handleEndPreview();
   }
 
@@ -491,12 +566,17 @@ export const App: React.FC<AppProps> = ({ core40SDK, extensionSDK }) => {
       headers: { "Content-Type": "application/json", Authorization: `Token token="${secretTag}"` },
       body: JSON.stringify(body),
     });
+    if (resp.status >= 400 && typeof resp.body === "string") {
+      throw new Error(resp.body || `Request failed (${resp.status})`);
+    }
     return resp.body;
   }
 
   async function handleValidate() {
     if (!pptxBase64) return;
-    setStatus("Checking template placeholders...");
+    setBusyLabel("Checking template...");
+    setActionError("");
+    setSavedNotice("");
     try {
       const res = await callCloudRun("/templates/validate", {
         filename: fileName,
@@ -504,71 +584,148 @@ export const App: React.FC<AppProps> = ({ core40SDK, extensionSDK }) => {
         dashboard_tiles: tiles.length > 0 ? tiles : undefined,
       });
       setReport(res);
-      setStatus(
-        res?.valid
-          ? `Template check passed! All ${res.bindings?.length || 0} items across ${res.slide_count} slides match.`
-          : `Template check found ${res?.issues?.length || 0} item(s) to review.`
-      );
+      if (!res?.valid) {
+        setCheckPopoverOpen(true);
+      }
     } catch (err: any) {
-      setStatus(`Template check failed: ${err?.message || err}`);
+      setActionError(`Template check failed: ${err?.message || err}`);
+      setCheckPopoverOpen(true);
+    } finally {
+      setBusyLabel("");
     }
   }
 
-  async function runPreviewWithTheme(overrideThemeName?: string) {
+  async function runPreview(overrideTheme?: LookerThemeOption) {
     if (!pptxBase64 || !selectedDashboardId) return;
-    const targetTheme = overrideThemeName || activeEmbedTheme;
-    setStatus(`Filling your PowerPoint slides with live data (${targetTheme})...`);
+    const targetOpt = overrideTheme || activeThemeOption;
+    const seq = ++previewSeqRef.current;
+    const fp = templateFingerprint || `${fileName}:${pptxBase64.length}:${pptxBase64.slice(-32)}`;
+    const cacheKey = `${selectedDashboardId}::${fp}::${targetOpt.name}`;
+
+    setActionError("");
+
+    // SWR-style instant cache hit when switching back to an already-rendered theme on the same upload
+    const cachedMerged = previewPptxCacheRef.current.get(cacheKey);
+    if (cachedMerged) {
+      setPreviewLoading(false);
+      setMergedPptxBase64(cachedMerged);
+      return;
+    }
+
+    // Immediately show the animated Slide Deck loading logo overlay on the Live Preview
+    setPreviewLoadingLabel(
+      mergedPptxBase64 ? `Applying ${targetOpt.label}...` : "Building live slide preview..."
+    );
+    setPreviewLoading(true);
+
     try {
-      const valRes =
-        report ||
-        (await callCloudRun("/templates/validate", {
+      let valRes = report;
+      if (!valRes) {
+        valRes = await callCloudRun("/templates/validate", {
           filename: fileName,
           pptx_base64: pptxBase64,
           dashboard_tiles: tiles.length > 0 ? tiles : undefined,
-        }));
-      setReport(valRes);
+        });
+        if (seq !== previewSeqRef.current) return;
+        setReport(valRes);
+        if (valRes && !valRes.valid) {
+          setCheckPopoverOpen(true);
+        }
+      }
 
-      const reqSlugs = new Set<string>(
-        (valRes?.bindings || [])
-          .map((b: any) => String(b.tile_slug || ""))
-          .filter((s: string) => s && s !== "_plan")
-      );
-      const tileCsvs = await fetchDashboardTileCsvs(core40SDK, selectedDashboardId, reqSlugs);
-      const selectedDash = dashboards.find((d) => d.id === selectedDashboardId);
+      const reqSlugsArr = Array.from(
+        new Set<string>(
+          (valRes?.bindings || [])
+            .map((b: any) => String(b.tile_slug || ""))
+            .filter((s: string) => s && s !== "_plan")
+        )
+      ).sort();
+      const csvCacheKey = `${selectedDashboardId}::${reqSlugsArr.join(",")}`;
+      let tileCsvs = tileCsvCacheRef.current.get(csvCacheKey);
+      if (!tileCsvs) {
+        tileCsvs = await fetchDashboardTileCsvs(
+          core40SDK,
+          selectedDashboardId,
+          new Set(reqSlugsArr)
+        );
+        if (seq !== previewSeqRef.current) return;
+        tileCsvCacheRef.current.set(csvCacheKey, tileCsvs);
+      }
 
+      const hostBase = (
+        extensionSDK?.lookerHostData?.hostUrl || "https://looker.example.com"
+      ).replace(/\/+$/, "");
+
+      const isOriginal = targetOpt.name === TEMPLATE_ORIGINAL_THEME;
       const mergeRes = await callCloudRun("/templates/preview", {
         pptx_base64: pptxBase64,
         tile_csvs: tileCsvs,
-        plan_title:
-          brand && brand !== "Default"
-            ? `${brand} — ${selectedDash?.title || "Brand Overview"}`
-            : selectedDash?.title || "Executive Business Review",
-        plan_url: `https://looker.example.com/dashboards/${selectedDashboardId}`,
-        theme: targetTheme,
+        plan_title: selectedDashboardTitle || "Executive Business Review",
+        plan_url: `${hostBase}/dashboards/${selectedDashboardId}`,
+        theme: isOriginal ? undefined : targetOpt.name,
+        theme_palette: isOriginal ? undefined : targetOpt.palette,
       });
+
+      // Discard late-arriving response if user clicked another theme in the meantime
+      if (seq !== previewSeqRef.current) return;
+
       if (mergeRes?.error) {
-        setStatus(`Could not generate preview: ${mergeRes.error}`);
+        setPreviewLoading(false);
+        setActionError(`Could not generate preview: ${mergeRes.error}`);
+        setCheckPopoverOpen(true);
         return;
       }
-      setMergedPptxBase64(String(mergeRes.pptx_base64 || ""));
-      setStatus("");
+
+      const outB64 = String(mergeRes?.pptx_base64 || "");
+      if (outB64) {
+        previewPptxCacheRef.current.set(cacheKey, outB64);
+        setMergedPptxBase64(outB64);
+      }
+      setPreviewLoading(false);
     } catch (err: any) {
-      setStatus(`Preview failed: ${err?.message || err}`);
+      if (seq !== previewSeqRef.current) return;
+      setPreviewLoading(false);
+      setActionError(`Preview failed: ${err?.message || err}`);
+      setCheckPopoverOpen(true);
     }
   }
 
-  async function handleBrandOrModeChange(nextBrand: string, nextIsDark: boolean) {
-    setBrand(nextBrand);
-    setIsDark(nextIsDark);
-    if (mergedPptxBase64 && pptxBase64 && selectedDashboardId) {
+  function handleSelectLookerTheme(opt: LookerThemeOption) {
+    setSelectedThemeName(opt.name);
+    if (opt.name !== TEMPLATE_ORIGINAL_THEME) {
+      setIsDark(opt.isDark);
+    }
+    if ((mergedPptxBase64 || previewLoading) && pptxBase64 && selectedDashboardId) {
       desiredSlideRef.current = currentSlide;
-      await runPreviewWithTheme(getEmbedThemeName(nextIsDark, nextBrand));
+      void runPreview(opt);
+    }
+  }
+
+  function handleToggleLightDark() {
+    const nextDark = !isDark;
+    setIsDark(nextDark);
+    let nextOpt: LookerThemeOption | undefined;
+    if (activeThemeOption.pairCounterpart) {
+      nextOpt = lookerThemes.find((t) => t.name === activeThemeOption.pairCounterpart);
+    } else if (activeThemeOption.name !== TEMPLATE_ORIGINAL_THEME) {
+      nextOpt = lookerThemes.find(
+        (t) => t.name === (nextDark ? "Embed_Demo_Dark" : "Embed_Demo_Light")
+      );
+    }
+    if (nextOpt) {
+      setSelectedThemeName(nextOpt.name);
+      if ((mergedPptxBase64 || previewLoading) && pptxBase64 && selectedDashboardId) {
+        desiredSlideRef.current = currentSlide;
+        void runPreview(nextOpt);
+      }
     }
   }
 
   function handleDownloadFilled() {
     if (!mergedPptxBase64) return;
-    const outName = fileName.replace(/\.pptx$/i, "") + `_${activeEmbedTheme}.pptx`;
+    const suffix =
+      selectedThemeName === TEMPLATE_ORIGINAL_THEME ? "filled" : selectedThemeName;
+    const outName = fileName.replace(/\.pptx$/i, "") + `_${suffix}.pptx`;
     const link = document.createElement("a");
     link.href = `data:application/vnd.openxmlformats-officedocument.presentationml.presentation;base64,${mergedPptxBase64}`;
     link.download = outName;
@@ -578,8 +735,10 @@ export const App: React.FC<AppProps> = ({ core40SDK, extensionSDK }) => {
   }
 
   async function handleUpload() {
-    if (!pptxBase64) return;
-    setStatus("Saving template to your shared library...");
+    if (!pptxBase64 || !report?.valid) return;
+    setBusyLabel("Saving template...");
+    setActionError("");
+    setSavedNotice("");
     try {
       const targetUri =
         config.templatesGcsUri ||
@@ -593,22 +752,51 @@ export const App: React.FC<AppProps> = ({ core40SDK, extensionSDK }) => {
         templates_gcs_uri: targetUri,
       });
       setReport(res);
-      setStatus(
-        res?.gcs_uri
-          ? `Saved "${fileName}" to your shared template library.`
-          : "Could not save template until all template issues are resolved."
-      );
+      if (res?.gcs_uri) {
+        setSavedNotice(`Saved "${fileName}"`);
+      } else {
+        setCheckPopoverOpen(true);
+      }
     } catch (err: any) {
-      setStatus(`Save failed: ${err?.message || err}`);
+      setActionError(`Save failed: ${err?.message || err}`);
+      setCheckPopoverOpen(true);
+    } finally {
+      setBusyLabel("");
     }
+  }
+
+  const formattedErrorLines = useMemo(() => {
+    const lines: string[] = [];
+    if (actionError) lines.push(actionError);
+    if (Array.isArray(report?.issues)) {
+      for (const iss of report.issues) {
+        lines.push(`Slide ${iss.slide_index || "?"}: ${iss.message}`);
+      }
+    }
+    return lines;
+  }, [actionError, report]);
+
+  async function handleCopyErrors() {
+    if (formattedErrorLines.length === 0) return;
+    await copyToClipboardSafe(extensionSDK, formattedErrorLines.join("\n"));
+    setCopiedErrors(true);
+    setTimeout(() => setCopiedErrors(false), 1800);
   }
 
   const isConfigured = Boolean(
     config.cloudRunUrl && (!config.useOAuth || config.oauthClientId)
   );
+  const effectiveRoute = !isConfigured ? "/config" : route;
 
-  // Show /config automatically if not configured yet, or when navigated to /config via route/hash
-  if (!isConfigured || route === "/config") {
+  useEffect(() => {
+    try {
+      extensionSDK?.clientRouteChanged?.(effectiveRoute);
+    } catch {
+      // ignore host route sync errors in standalone mock harness
+    }
+  }, [effectiveRoute]);
+
+  if (effectiveRoute === "/config") {
     return (
       <ConfigPage
         core40SDK={core40SDK}
@@ -631,7 +819,6 @@ export const App: React.FC<AppProps> = ({ core40SDK, extensionSDK }) => {
     );
   }
 
-  // Centered Sign-In screen when OAuth is enabled and the user is not logged in
   if (config.useOAuth && !oauthToken) {
     return (
       <div
@@ -659,21 +846,8 @@ export const App: React.FC<AppProps> = ({ core40SDK, extensionSDK }) => {
             boxShadow: "0 20px 50px rgba(0, 0, 0, 0.35)",
           }}
         >
-          <div
-            style={{
-              width: 56,
-              height: 56,
-              borderRadius: 14,
-              background: "rgba(56, 189, 248, 0.12)",
-              border: `1px solid ${ui.accent}`,
-              color: ui.accent,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              margin: "0 auto 18px",
-            }}
-          >
-            <IconSlides size={26} />
+          <div style={{ display: "flex", justifyContent: "center", marginBottom: 18 }}>
+            <ActionPptxDeckLogo size={52} />
           </div>
           <h1 style={{ margin: "0 0 10px", fontSize: 24, fontWeight: 700, color: ui.textPrimary }}>
             PowerPoint Report Builder
@@ -715,7 +889,7 @@ export const App: React.FC<AppProps> = ({ core40SDK, extensionSDK }) => {
             <IconGoogle />
             <span>{oauthSigningIn ? "Signing in..." : "Sign in with Google"}</span>
           </button>
-          {status && (
+          {actionError && (
             <div
               style={{
                 marginTop: 16,
@@ -727,7 +901,7 @@ export const App: React.FC<AppProps> = ({ core40SDK, extensionSDK }) => {
                 padding: "10px 12px",
               }}
             >
-              {status}
+              {actionError}
             </div>
           )}
         </div>
@@ -735,8 +909,18 @@ export const App: React.FC<AppProps> = ({ core40SDK, extensionSDK }) => {
     );
   }
 
-  const selectedDashTitle =
-    dashboards.find((d) => d.id === selectedDashboardId)?.title || "Selected Dashboard";
+  const selectedDashTitle = selectedDashboardTitle || "Open Dashboard";
+  const hasErrors = Boolean(actionError) || Boolean(report && !report.valid);
+  const isCheckPassed = Boolean(report?.valid) && !actionError;
+  const showStatusIcon = hasErrors || isCheckPassed;
+  const canSaveTemplate = Boolean(pptxBase64 && report?.valid && !busyLabel);
+  const isPreviewOpen = Boolean(mergedPptxBase64 || previewLoading);
+
+  const checkSummaryTooltip = hasErrors
+    ? formattedErrorLines[0] || "Template check found issues — click for details"
+    : isCheckPassed
+      ? `Template Ready — Matched ${report.bindings?.length || 0} items across ${report.slide_count} slides (click for details)`
+      : "";
 
   return (
     <div
@@ -749,8 +933,15 @@ export const App: React.FC<AppProps> = ({ core40SDK, extensionSDK }) => {
         transition: "background 0.2s ease, color 0.2s ease",
       }}
     >
+      <style>{`
+        @keyframes actionPptxPulse {
+          0%, 100% { transform: scale(1) translateY(0); opacity: 1; }
+          50% { transform: scale(1.08) translateY(-3px); opacity: 0.88; }
+        }
+      `}</style>
+
       <div style={{ maxWidth: 960, margin: "0 auto" }}>
-        {/* Header with Dynamic Brand & Light/Dark Theme Switcher */}
+        {/* Header with Real Looker Themes & Light/Dark Mode Switcher */}
         <div
           style={{
             display: "flex",
@@ -760,25 +951,11 @@ export const App: React.FC<AppProps> = ({ core40SDK, extensionSDK }) => {
             gap: 14,
             borderBottom: `1px solid ${ui.border}`,
             paddingBottom: 18,
-            marginBottom: 24,
+            marginBottom: 22,
           }}
         >
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-            <div
-              style={{
-                width: 40,
-                height: 40,
-                borderRadius: 10,
-                background: ui.cardBg,
-                border: `1px solid ${ui.accent}`,
-                color: ui.accent,
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-              }}
-            >
-              <IconSlides size={20} />
-            </div>
+            <ActionPptxDeckLogo size={40} />
             <div>
               <h1 style={{ margin: 0, fontSize: 22, fontWeight: 700, color: ui.textPrimary }}>
                 PowerPoint Report Builder
@@ -791,52 +968,18 @@ export const App: React.FC<AppProps> = ({ core40SDK, extensionSDK }) => {
           </div>
 
           <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-            {/* Brand Theme Selector (matching looker-embed-demo) */}
-            <div
-              style={{
-                display: "inline-flex",
-                alignItems: "center",
-                gap: 6,
-                background: ui.cardBg,
-                border: `1px solid ${ui.border}`,
-                borderRadius: 8,
-                padding: "5px 10px",
-                color: ui.accent,
-              }}
-            >
-              <IconPalette />
-              <select
-                id="brand-theme-select"
-                aria-label="Brand Theme"
-                value={brand}
-                onChange={(e) => void handleBrandOrModeChange(e.target.value, isDark)}
-                style={{
-                  background: "transparent",
-                  color: ui.textPrimary,
-                  border: "none",
-                  fontSize: 12,
-                  fontWeight: 600,
-                  cursor: "pointer",
-                  outline: "none",
-                }}
-              >
-                {BRAND_OPTIONS.map((b) => (
-                  <option
-                    key={b}
-                    value={b}
-                    style={{ background: ui.cardBg, color: ui.textPrimary }}
-                  >
-                    {b === "Default" ? "Default Theme" : `${b} Theme`}
-                  </option>
-                ))}
-              </select>
-            </div>
+            <LookerThemePicker
+              themes={lookerThemes}
+              selectedThemeName={selectedThemeName}
+              onSelect={handleSelectLookerTheme}
+              ui={ui}
+              isDark={isDark}
+            />
 
-            {/* Light / Dark Mode Toggle Button */}
             <button
               id="btn-theme-mode"
               type="button"
-              onClick={() => void handleBrandOrModeChange(brand, !isDark)}
+              onClick={handleToggleLightDark}
               style={{
                 display: "inline-flex",
                 alignItems: "center",
@@ -849,6 +992,7 @@ export const App: React.FC<AppProps> = ({ core40SDK, extensionSDK }) => {
                 fontSize: 12,
                 fontWeight: 600,
                 cursor: "pointer",
+                whiteSpace: "nowrap",
               }}
             >
               {isDark ? <IconSun /> : <IconMoon />}
@@ -869,6 +1013,7 @@ export const App: React.FC<AppProps> = ({ core40SDK, extensionSDK }) => {
                     border: `1px solid ${isDark ? "#059669" : "#10b981"}`,
                     padding: "6px 11px",
                     borderRadius: 999,
+                    whiteSpace: "nowrap",
                   }}
                 >
                   <IconCheckCircle />
@@ -890,6 +1035,7 @@ export const App: React.FC<AppProps> = ({ core40SDK, extensionSDK }) => {
                     fontSize: 12,
                     fontWeight: 600,
                     cursor: "pointer",
+                    whiteSpace: "nowrap",
                   }}
                 >
                   <IconLogOut />
@@ -901,13 +1047,21 @@ export const App: React.FC<AppProps> = ({ core40SDK, extensionSDK }) => {
         </div>
 
         {/* Step 1 & Step 2 Cards */}
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 18 }}>
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)",
+            gap: 16,
+            marginBottom: 16,
+          }}
+        >
           <div
             style={{
               background: ui.cardBg,
               border: `1px solid ${ui.border}`,
               borderRadius: 12,
               padding: 18,
+              minWidth: 0,
             }}
           >
             <div style={{ fontSize: 11, fontWeight: 700, color: ui.accent, marginBottom: 4 }}>
@@ -916,27 +1070,14 @@ export const App: React.FC<AppProps> = ({ core40SDK, extensionSDK }) => {
             <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 10 }}>
               Choose a Dashboard
             </div>
-            <select
-              id="dashboard-select"
-              value={selectedDashboardId}
-              onChange={(e) => void handleSelectDashboard(e.target.value)}
-              style={{
-                width: "100%",
-                padding: "10px 12px",
-                borderRadius: 8,
-                background: ui.inputBg,
-                color: ui.textPrimary,
-                border: `1px solid ${ui.border}`,
-                fontSize: 13,
-              }}
-            >
-              <option value="">-- Select a Looker Dashboard --</option>
-              {dashboards.map((d) => (
-                <option key={d.id} value={d.id}>
-                  {d.title}
-                </option>
-              ))}
-            </select>
+            <DashboardPicker
+              core40SDK={core40SDK}
+              extensionSDK={extensionSDK}
+              selectedDashboardId={selectedDashboardId}
+              onSelect={(id, summary) => void handleSelectDashboard(id, summary)}
+              ui={ui}
+              isDark={isDark}
+            />
             {tiles.length > 0 && (
               <div style={{ marginTop: 10, display: "flex", flexWrap: "wrap", gap: 6 }}>
                 {tiles.slice(0, 9).map((t) => (
@@ -980,6 +1121,7 @@ export const App: React.FC<AppProps> = ({ core40SDK, extensionSDK }) => {
               border: `1px solid ${ui.border}`,
               borderRadius: 12,
               padding: 18,
+              minWidth: 0,
             }}
           >
             <div style={{ fontSize: 11, fontWeight: 700, color: ui.accent, marginBottom: 4 }}>
@@ -1013,372 +1155,591 @@ export const App: React.FC<AppProps> = ({ core40SDK, extensionSDK }) => {
           </div>
         </div>
 
-        {/* Action Toolbar */}
+        {/* Single Unified Workspace Card: Action Toolbar + Sticky Check/Error Icon + Live Preview */}
         <div
           style={{
-            display: "flex",
-            flexWrap: "wrap",
-            gap: 10,
-            alignItems: "center",
             background: ui.cardBg,
             border: `1px solid ${ui.border}`,
             borderRadius: 12,
             padding: "14px 18px",
-            marginBottom: 18,
+            marginBottom: 20,
           }}
         >
-          <button
-            id="btn-preview"
-            type="button"
-            disabled={!pptxBase64 || !selectedDashboardId}
-            onClick={() => void runPreviewWithTheme()}
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 8,
-              background: ui.accent,
-              color: ui.accentContrast,
-              border: "none",
-              borderRadius: 8,
-              padding: "10px 18px",
-              fontSize: 13,
-              fontWeight: 700,
-              cursor: pptxBase64 && selectedDashboardId ? "pointer" : "not-allowed",
-              opacity: pptxBase64 && selectedDashboardId ? 1 : 0.5,
-            }}
-          >
-            <IconPlay />
-            <span>Live Preview</span>
-          </button>
-
-          <button
-            id="btn-validate"
-            type="button"
-            disabled={!pptxBase64}
-            onClick={() => void handleValidate()}
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 8,
-              background: ui.inputBg,
-              color: ui.textPrimary,
-              border: `1px solid ${ui.border}`,
-              borderRadius: 8,
-              padding: "10px 16px",
-              fontSize: 13,
-              fontWeight: 600,
-              cursor: pptxBase64 ? "pointer" : "not-allowed",
-              opacity: pptxBase64 ? 1 : 0.5,
-            }}
-          >
-            <IconCheck />
-            <span>Check Template</span>
-          </button>
-
-          {mergedPptxBase64 && (
-            <button
-              id="btn-download"
-              type="button"
-              onClick={handleDownloadFilled}
-              style={{
-                display: "inline-flex",
-                alignItems: "center",
-                gap: 8,
-                background: ui.inputBg,
-                color: ui.accent,
-                border: `1px solid ${ui.accent}`,
-                borderRadius: 8,
-                padding: "10px 16px",
-                fontSize: 13,
-                fontWeight: 600,
-                cursor: "pointer",
-              }}
-            >
-              <IconDownload />
-              <span>Download Filled .pptx</span>
-            </button>
-          )}
-
-          <button
-            id="btn-upload"
-            type="button"
-            disabled={!pptxBase64 || (report && !report.valid)}
-            onClick={() => void handleUpload()}
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 8,
-              background: "#059669",
-              color: "#ffffff",
-              border: "none",
-              borderRadius: 8,
-              padding: "10px 18px",
-              fontSize: 13,
-              fontWeight: 700,
-              marginLeft: "auto",
-              cursor: pptxBase64 && (!report || report.valid) ? "pointer" : "not-allowed",
-              opacity: pptxBase64 && (!report || report.valid) ? 1 : 0.5,
-            }}
-          >
-            <IconUpload />
-            <span>Save to Template Library</span>
-          </button>
-        </div>
-
-        {/* Status Banner */}
-        {status && (
+          {/* Unified Top Action Bar */}
           <div
             style={{
-              background: ui.cardBg,
-              borderLeft: `4px solid ${ui.accent}`,
-              border: `1px solid ${ui.border}`,
-              padding: "12px 16px",
-              borderRadius: 8,
-              marginBottom: 18,
-              fontSize: 13,
-              fontWeight: 600,
-              color: ui.textPrimary,
+              display: "flex",
+              flexWrap: "wrap",
+              gap: 10,
+              alignItems: "center",
+              justifyContent: "space-between",
             }}
           >
-            {status}
-          </div>
-        )}
-
-        {/* Live Filled-In PPTX Preview Panel with Prominent SVG Icon Next / Back / End Controls */}
-        {mergedPptxBase64 && (
-          <div
-            style={{
-              background: ui.cardBg,
-              border: `1px solid ${ui.border}`,
-              borderRadius: 12,
-              padding: 20,
-              marginBottom: 20,
-            }}
-          >
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
-                marginBottom: 14,
-              }}
-            >
-              <div>
-                <div style={{ fontSize: 17, fontWeight: 700, color: ui.textPrimary }}>
-                  Live Preview — {selectedDashTitle}
-                </div>
-                <div style={{ fontSize: 12, color: ui.textMuted, marginTop: 2 }}>
-                  Viewing Slide {currentSlide + 1} of {totalSlides || 1}  •  Theme:{" "}
-                  <strong style={{ color: ui.accent }}>{activeEmbedTheme}</strong>
-                </div>
-              </div>
+            {/* Left Action Cluster */}
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
               <button
-                id="btn-close-preview"
+                id="btn-preview"
                 type="button"
-                onClick={handleEndPreview}
+                disabled={!pptxBase64 || !selectedDashboardId || previewLoading}
+                onClick={() => void runPreview()}
                 style={{
                   display: "inline-flex",
                   alignItems: "center",
-                  gap: 6,
-                  background: isDark ? "#1e293b" : "#fee2e2",
-                  color: isDark ? "#fda4af" : "#b91c1c",
-                  border: `1px solid ${isDark ? "#881337" : "#fca5a5"}`,
+                  gap: 7,
+                  background: ui.accent,
+                  color: ui.accentContrast,
+                  border: "none",
                   borderRadius: 8,
-                  padding: "8px 14px",
+                  padding: "9px 16px",
                   fontSize: 13,
                   fontWeight: 700,
-                  cursor: "pointer",
+                  whiteSpace: "nowrap",
+                  cursor:
+                    pptxBase64 && selectedDashboardId && !previewLoading
+                      ? "pointer"
+                      : "not-allowed",
+                  opacity: pptxBase64 && selectedDashboardId ? 1 : 0.5,
                 }}
               >
-                <IconClose />
-                <span>Close Preview</span>
+                <IconPlay />
+                <span>Live Preview</span>
               </button>
-            </div>
 
-            {/* Slide Canvas */}
-            <div
-              ref={previewContainerRef}
-              style={{
-                display: "flex",
-                justifyContent: "center",
-                background: ui.canvasBg,
-                borderRadius: 10,
-                padding: 16,
-                border: `1px solid ${ui.border}`,
-              }}
-            />
-
-            {/* Obvious Next / Back / End Slide Navigation Bar with SVG Icons */}
-            {(() => {
-              const navBtnStyle = (enabled: boolean, primary = false): React.CSSProperties => ({
-                display: "inline-flex",
-                alignItems: "center",
-                gap: 6,
-                background: !enabled ? ui.inputBg : primary ? ui.accent : ui.cardBg,
-                color: !enabled ? ui.textMuted : primary ? ui.accentContrast : ui.textPrimary,
-                border: `1px solid ${enabled && primary ? ui.accent : ui.border}`,
-                borderRadius: 8,
-                padding: primary ? "10px 22px" : "10px 18px",
-                fontSize: 14,
-                fontWeight: 700,
-                cursor: enabled ? "pointer" : "not-allowed",
-                opacity: enabled ? 1 : 0.5,
-              });
-              return (
-                <div
-                  style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    alignItems: "center",
-                    marginTop: 16,
-                    padding: "12px 16px",
-                    background: ui.inputBg,
-                    border: `1px solid ${ui.border}`,
-                    borderRadius: 10,
-                  }}
-                >
-                  <button
-                    id="btn-slide-prev"
-                    type="button"
-                    disabled={currentSlide <= 0}
-                    onClick={() => goToSlide(currentSlide - 1)}
-                    style={navBtnStyle(currentSlide > 0)}
-                  >
-                    <IconArrowLeft />
-                    <span>Back</span>
-                  </button>
-
-                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    {Array.from({ length: totalSlides }, (_, idx) => {
-                      const active = idx === currentSlide;
-                      return (
-                        <button
-                          key={idx}
-                          id={`btn-slide-${idx + 1}`}
-                          type="button"
-                          onClick={() => goToSlide(idx)}
-                          style={{
-                            background: active ? ui.accent : ui.cardBg,
-                            color: active ? ui.accentContrast : ui.textSecondary,
-                            border: `1px solid ${active ? ui.accent : ui.border}`,
-                            borderRadius: 8,
-                            padding: "8px 14px",
-                            fontSize: 13,
-                            fontWeight: 700,
-                            cursor: "pointer",
-                          }}
-                        >
-                          Slide {idx + 1}
-                        </button>
-                      );
-                    })}
-                  </div>
-
-                  <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                    <button
-                      id="btn-slide-next"
-                      type="button"
-                      disabled={currentSlide >= totalSlides - 1}
-                      onClick={() => goToSlide(currentSlide + 1)}
-                      style={navBtnStyle(currentSlide < totalSlides - 1, true)}
-                    >
-                      <span>Next</span>
-                      <IconArrowRight />
-                    </button>
-                    <button
-                      id="btn-slide-end"
-                      type="button"
-                      disabled={currentSlide >= totalSlides - 1}
-                      onClick={() => goToSlide(totalSlides - 1)}
-                      style={navBtnStyle(currentSlide < totalSlides - 1)}
-                    >
-                      <span>End</span>
-                      <IconSkipEnd />
-                    </button>
-                  </div>
-                </div>
-              );
-            })()}
-          </div>
-        )}
-
-        {/* Simplified End-User Template Check Card */}
-        {report && (
-          <div
-            style={{
-              background: ui.cardBg,
-              border: `1px solid ${ui.border}`,
-              borderRadius: 12,
-              padding: "16px 20px",
-            }}
-          >
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <div>
-                <div style={{ fontSize: 15, fontWeight: 700, color: ui.textPrimary }}>
-                  {report.valid ? "Template Ready" : "Template Needs Attention"}
-                </div>
-                <div style={{ fontSize: 13, color: ui.textMuted, marginTop: 2 }}>
-                  {report.valid
-                    ? `Matched ${report.bindings?.length || 0} charts, tables, and text placeholders across ${report.slide_count} slides.`
-                    : `Found ${report.issues?.length || 0} item(s) that did not match the selected dashboard.`}
-                </div>
-              </div>
-              <span
+              <button
+                id="btn-validate"
+                type="button"
+                disabled={!pptxBase64 || Boolean(busyLabel)}
+                onClick={() => void handleValidate()}
                 style={{
                   display: "inline-flex",
                   alignItems: "center",
-                  gap: 6,
-                  fontSize: 12,
-                  fontWeight: 700,
-                  padding: "6px 14px",
-                  borderRadius: 999,
-                  background: report.valid
-                    ? isDark
-                      ? "#064e3b"
-                      : "#d1fae5"
-                    : isDark
-                      ? "#7f1d1d"
-                      : "#fee2e2",
-                  color: report.valid
-                    ? isDark
-                      ? "#34d399"
-                      : "#047857"
-                    : isDark
-                      ? "#fca5a5"
-                      : "#b91c1c",
+                  gap: 7,
+                  background: ui.inputBg,
+                  color: ui.textPrimary,
+                  border: `1px solid ${ui.border}`,
+                  borderRadius: 8,
+                  padding: "9px 14px",
+                  fontSize: 13,
+                  fontWeight: 600,
+                  whiteSpace: "nowrap",
+                  cursor: pptxBase64 && !busyLabel ? "pointer" : "not-allowed",
+                  opacity: pptxBase64 ? 1 : 0.5,
                 }}
               >
-                {report.valid ? <IconCheckCircle /> : <IconAlert />}
-                <span>{report.valid ? "Ready to Use" : `${report.issues?.length || 0} Issue(s)`}</span>
-              </span>
+                <IconCheck />
+                <span>Check Template</span>
+              </button>
+
+              {mergedPptxBase64 && (
+                <button
+                  id="btn-download"
+                  type="button"
+                  onClick={handleDownloadFilled}
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 7,
+                    background: ui.inputBg,
+                    color: ui.accent,
+                    border: `1px solid ${ui.accent}`,
+                    borderRadius: 8,
+                    padding: "9px 14px",
+                    fontSize: 13,
+                    fontWeight: 600,
+                    whiteSpace: "nowrap",
+                    cursor: "pointer",
+                  }}
+                >
+                  <IconDownload />
+                  <span>Download Filled .pptx</span>
+                </button>
+              )}
+
+              {isPreviewOpen && selectedDashboardId && (
+                <button
+                  type="button"
+                  data-testid="preview-dashboard-link"
+                  onClick={() =>
+                    extensionSDK?.openBrowserWindow?.(
+                      `/dashboards/${encodeURIComponent(selectedDashboardId)}`,
+                      "_blank"
+                    )
+                  }
+                  title="Open source dashboard in Looker"
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 5,
+                    background: "transparent",
+                    border: "none",
+                    color: ui.accent,
+                    fontSize: 13,
+                    fontWeight: 700,
+                    padding: "4px 6px",
+                    cursor: "pointer",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  <span>{selectedDashTitle}</span>
+                  <IconExternal />
+                </button>
+              )}
             </div>
 
-            {Array.isArray(report.issues) && report.issues.length > 0 && (
-              <div
-                style={{
-                  background: isDark ? "#450a0a" : "#fef2f2",
-                  border: "1px solid #dc2626",
-                  borderRadius: 8,
-                  padding: 12,
-                  marginTop: 12,
-                }}
-              >
-                {report.issues.map((iss: any, idx: number) => (
-                  <div
-                    key={idx}
+            {/* Right Status + Save + Close Cluster */}
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 9,
+                marginLeft: "auto",
+              }}
+            >
+              {busyLabel && (
+                <span
+                  style={{
+                    fontSize: 12,
+                    fontWeight: 600,
+                    color: ui.textMuted,
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {busyLabel}
+                </span>
+              )}
+
+              {savedNotice && !busyLabel && (
+                <span
+                  style={{
+                    fontSize: 12,
+                    fontWeight: 600,
+                    color: isDark ? "#34d399" : "#047857",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {savedNotice}
+                </span>
+              )}
+
+              {/* Clickable Green Check / Red X Icon with Hover Tooltip & Sticky Click-Away Popover */}
+              {showStatusIcon && (
+                <div ref={checkPopoverRef} style={{ position: "relative", display: "inline-flex" }}>
+                  <button
+                    id="btn-validation-status"
+                    data-testid="btn-validation-status"
+                    type="button"
+                    title={checkSummaryTooltip}
+                    aria-label={checkSummaryTooltip}
+                    aria-expanded={checkPopoverOpen}
+                    onClick={() => setCheckPopoverOpen((v) => !v)}
                     style={{
-                      fontSize: 13,
-                      color: isDark ? "#fecaca" : "#991b1b",
-                      marginBottom: 4,
+                      display: "inline-flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      gap: 5,
+                      height: 36,
+                      minWidth: 36,
+                      padding: formattedErrorLines.length > 1 ? "0 10px" : "0 9px",
+                      borderRadius: 999,
+                      cursor: "pointer",
+                      background: hasErrors
+                        ? isDark
+                          ? "#450a0a"
+                          : "#fee2e2"
+                        : isDark
+                          ? "#064e3b"
+                          : "#d1fae5",
+                      color: hasErrors
+                        ? isDark
+                          ? "#fca5a5"
+                          : "#b91c1c"
+                        : isDark
+                          ? "#34d399"
+                          : "#047857",
+                      border: `1px solid ${
+                        hasErrors
+                          ? isDark
+                            ? "#dc2626"
+                            : "#f87171"
+                          : isDark
+                            ? "#059669"
+                            : "#10b981"
+                      }`,
+                      boxShadow: checkPopoverOpen
+                        ? `0 0 0 2px ${hasErrors ? "#ef444455" : "#10b98155"}`
+                        : "none",
                     }}
                   >
-                    Slide {iss.slide_index || "?"}: {iss.message}
-                  </div>
-                ))}
-              </div>
-            )}
+                    {hasErrors ? <IconXCircle /> : <IconCheckCircle />}
+                    {hasErrors && formattedErrorLines.length > 0 && (
+                      <span style={{ fontSize: 11.5, fontWeight: 700 }}>
+                        {formattedErrorLines.length}
+                      </span>
+                    )}
+                  </button>
+
+                  {checkPopoverOpen && (
+                    <div
+                      role="dialog"
+                      data-testid="validation-sticky-popover"
+                      style={{
+                        position: "absolute",
+                        top: "calc(100% + 8px)",
+                        right: 0,
+                        width: "min(440px, 88vw)",
+                        zIndex: 80,
+                        background: ui.cardBg,
+                        border: `1px solid ${hasErrors ? "#dc2626" : ui.border}`,
+                        borderRadius: 12,
+                        padding: 14,
+                        boxShadow: isDark
+                          ? "0 22px 48px rgba(0, 0, 0, 0.68)"
+                          : "0 18px 40px rgba(15, 23, 42, 0.2)",
+                      }}
+                    >
+                      <div
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "space-between",
+                          gap: 8,
+                          marginBottom: hasErrors ? 10 : 4,
+                        }}
+                      >
+                        <div
+                          style={{
+                            display: "inline-flex",
+                            alignItems: "center",
+                            gap: 7,
+                            fontSize: 13.5,
+                            fontWeight: 700,
+                            color: hasErrors
+                              ? isDark
+                                ? "#fca5a5"
+                                : "#b91c1c"
+                              : isDark
+                                ? "#34d399"
+                                : "#047857",
+                          }}
+                        >
+                          {hasErrors ? <IconXCircle /> : <IconCheckCircle />}
+                          <span>
+                            {hasErrors
+                              ? `Template Check (${formattedErrorLines.length} issue${
+                                  formattedErrorLines.length === 1 ? "" : "s"
+                                })`
+                              : "Template Ready"}
+                          </span>
+                        </div>
+
+                        <div style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                          {hasErrors && formattedErrorLines.length > 0 && (
+                            <button
+                              type="button"
+                              data-testid="btn-copy-errors"
+                              onClick={() => void handleCopyErrors()}
+                              style={{
+                                display: "inline-flex",
+                                alignItems: "center",
+                                gap: 5,
+                                padding: "4px 9px",
+                                borderRadius: 6,
+                                fontSize: 11.5,
+                                fontWeight: 600,
+                                cursor: "pointer",
+                                background: ui.inputBg,
+                                color: ui.textPrimary,
+                                border: `1px solid ${ui.border}`,
+                                whiteSpace: "nowrap",
+                              }}
+                            >
+                              {copiedErrors ? <IconCheck /> : <IconCopy />}
+                              <span>{copiedErrors ? "Copied" : "Copy"}</span>
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            aria-label="Close details"
+                            onClick={() => setCheckPopoverOpen(false)}
+                            style={{
+                              background: "transparent",
+                              border: "none",
+                              color: ui.textMuted,
+                              cursor: "pointer",
+                              padding: 3,
+                              display: "inline-flex",
+                            }}
+                          >
+                            <IconClose />
+                          </button>
+                        </div>
+                      </div>
+
+                      {!hasErrors && report?.valid && (
+                        <div style={{ fontSize: 12.5, color: ui.textSecondary, lineHeight: 1.5 }}>
+                          Matched <strong>{report.bindings?.length || 0}</strong> charts, tables,
+                          and text placeholders across <strong>{report.slide_count}</strong>{" "}
+                          slide{report.slide_count === 1 ? "" : "s"}. Ready to save to your
+                          shared Template Library.
+                        </div>
+                      )}
+
+                      {hasErrors && (
+                        <div
+                          style={{
+                            maxHeight: 220,
+                            overflowY: "auto",
+                            background: isDark ? "#450a0a" : "#fef2f2",
+                            border: "1px solid #dc2626",
+                            borderRadius: 8,
+                            padding: "9px 11px",
+                            display: "grid",
+                            gap: 6,
+                          }}
+                        >
+                          {formattedErrorLines.map((line, idx) => (
+                            <div
+                              key={idx}
+                              style={{
+                                fontSize: 12.5,
+                                lineHeight: 1.45,
+                                color: isDark ? "#fecaca" : "#991b1b",
+                                wordBreak: "break-word",
+                              }}
+                            >
+                              {line}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <button
+                id="btn-upload"
+                type="button"
+                disabled={!canSaveTemplate}
+                title={
+                  !pptxBase64
+                    ? "Select a .pptx template first"
+                    : !report
+                      ? "Run Check Template (or Live Preview) before saving"
+                      : !report.valid
+                        ? "Resolve template check errors before saving"
+                        : "Save validated template to shared library"
+                }
+                onClick={() => void handleUpload()}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 7,
+                  background: "#059669",
+                  color: "#ffffff",
+                  border: "none",
+                  borderRadius: 8,
+                  padding: "9px 16px",
+                  fontSize: 13,
+                  fontWeight: 700,
+                  whiteSpace: "nowrap",
+                  cursor: canSaveTemplate ? "pointer" : "not-allowed",
+                  opacity: canSaveTemplate ? 1 : 0.45,
+                }}
+              >
+                <IconUpload />
+                <span>Save to Template Library</span>
+              </button>
+
+              {isPreviewOpen && (
+                <button
+                  id="btn-close-preview"
+                  type="button"
+                  onClick={handleEndPreview}
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 6,
+                    background: isDark ? "#1e293b" : "#fee2e2",
+                    color: isDark ? "#fda4af" : "#b91c1c",
+                    border: `1px solid ${isDark ? "#881337" : "#fca5a5"}`,
+                    borderRadius: 8,
+                    padding: "9px 13px",
+                    fontSize: 13,
+                    fontWeight: 700,
+                    whiteSpace: "nowrap",
+                    cursor: "pointer",
+                  }}
+                >
+                  <IconClose />
+                  <span>Close Preview</span>
+                </button>
+              )}
+            </div>
           </div>
-        )}
+
+          {/* Embedded Live Preview inside the Same Unified Card */}
+          {isPreviewOpen && (
+            <div
+              style={{
+                borderTop: `1px solid ${ui.border}`,
+                marginTop: 14,
+                paddingTop: 16,
+              }}
+            >
+              <div
+                style={{
+                  position: "relative",
+                  display: "flex",
+                  justifyContent: "center",
+                  alignItems: "center",
+                  minHeight: 484,
+                  background: ui.canvasBg,
+                  borderRadius: 10,
+                  padding: 16,
+                  border: `1px solid ${ui.border}`,
+                  overflow: "hidden",
+                }}
+              >
+                <div ref={previewContainerRef} style={{ display: "flex", justifyContent: "center" }} />
+
+                {previewLoading && (
+                  <div
+                    data-testid="preview-loading-overlay"
+                    style={{
+                      position: "absolute",
+                      inset: 0,
+                      display: "flex",
+                      flexDirection: "column",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      gap: 12,
+                      background: isDark
+                        ? "rgba(9, 13, 22, 0.74)"
+                        : "rgba(240, 244, 249, 0.78)",
+                      backdropFilter: "blur(3px)",
+                      zIndex: 20,
+                    }}
+                  >
+                    <ActionPptxDeckLogo size={56} pulse />
+                    <div
+                      style={{
+                        fontSize: 13,
+                        fontWeight: 700,
+                        color: ui.textPrimary,
+                        background: ui.cardBg,
+                        border: `1px solid ${ui.border}`,
+                        padding: "6px 14px",
+                        borderRadius: 999,
+                      }}
+                    >
+                      {previewLoadingLabel || "Rendering preview..."}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {totalSlides > 0 &&
+                (() => {
+                  const navBtnStyle = (
+                    enabled: boolean,
+                    primary = false
+                  ): React.CSSProperties => ({
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 6,
+                    background: !enabled ? ui.inputBg : primary ? ui.accent : ui.cardBg,
+                    color: !enabled ? ui.textMuted : primary ? ui.accentContrast : ui.textPrimary,
+                    border: `1px solid ${enabled && primary ? ui.accent : ui.border}`,
+                    borderRadius: 8,
+                    padding: primary ? "9px 20px" : "9px 16px",
+                    fontSize: 13.5,
+                    fontWeight: 700,
+                    whiteSpace: "nowrap",
+                    cursor: enabled ? "pointer" : "not-allowed",
+                    opacity: enabled ? 1 : 0.5,
+                  });
+                  return (
+                    <div
+                      style={{
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                        flexWrap: "wrap",
+                        gap: 10,
+                        marginTop: 14,
+                        padding: "10px 14px",
+                        background: ui.inputBg,
+                        border: `1px solid ${ui.border}`,
+                        borderRadius: 10,
+                      }}
+                    >
+                      <button
+                        id="btn-slide-prev"
+                        type="button"
+                        disabled={currentSlide <= 0}
+                        onClick={() => goToSlide(currentSlide - 1)}
+                        style={navBtnStyle(currentSlide > 0)}
+                      >
+                        <IconArrowLeft />
+                        <span>Back</span>
+                      </button>
+
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                        {Array.from({ length: totalSlides }, (_, idx) => {
+                          const active = idx === currentSlide;
+                          return (
+                            <button
+                              key={idx}
+                              id={`btn-slide-${idx + 1}`}
+                              type="button"
+                              onClick={() => goToSlide(idx)}
+                              style={{
+                                background: active ? ui.accent : ui.cardBg,
+                                color: active ? ui.accentContrast : ui.textSecondary,
+                                border: `1px solid ${active ? ui.accent : ui.border}`,
+                                borderRadius: 8,
+                                padding: "7px 13px",
+                                fontSize: 13,
+                                fontWeight: 700,
+                                whiteSpace: "nowrap",
+                                cursor: "pointer",
+                              }}
+                            >
+                              Slide {idx + 1}
+                            </button>
+                          );
+                        })}
+                      </div>
+
+                      <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                        <button
+                          id="btn-slide-next"
+                          type="button"
+                          disabled={currentSlide >= totalSlides - 1}
+                          onClick={() => goToSlide(currentSlide + 1)}
+                          style={navBtnStyle(currentSlide < totalSlides - 1, true)}
+                        >
+                          <span>Next</span>
+                          <IconArrowRight />
+                        </button>
+                        <button
+                          id="btn-slide-end"
+                          type="button"
+                          disabled={currentSlide >= totalSlides - 1}
+                          onClick={() => goToSlide(totalSlides - 1)}
+                          style={navBtnStyle(currentSlide < totalSlides - 1)}
+                        >
+                          <span>End</span>
+                          <IconSkipEnd />
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })()}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

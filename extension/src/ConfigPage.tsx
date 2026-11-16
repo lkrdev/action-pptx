@@ -9,6 +9,45 @@ export interface ExtensionConfigData {
   oauthGcsPassthrough?: boolean;
 }
 
+export function buildSecretDomainAllowlist(rawUrl?: string): string {
+  const cleaned = (rawUrl || "").trim().replace(/\/+$/, "");
+  if (!cleaned) return "";
+  try {
+    const parsed = new URL(cleaned);
+    const base = `${parsed.origin}${parsed.pathname.replace(/\/+$/, "")}`;
+    return `${base},${base}/,${base}/*`;
+  } catch {
+    return "";
+  }
+}
+
+export async function copyToClipboardSafe(extensionSDK: any, text: string): Promise<void> {
+  try {
+    if (typeof extensionSDK?.clipboardWrite === "function") {
+      await extensionSDK.clipboardWrite(text);
+      return;
+    }
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return;
+    }
+  } catch {
+    // fall through to textarea copy inside sandboxed iframe
+  }
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.style.position = "fixed";
+  ta.style.opacity = "0";
+  document.body.appendChild(ta);
+  ta.focus();
+  ta.select();
+  try {
+    document.execCommand("copy");
+  } finally {
+    document.body.removeChild(ta);
+  }
+}
+
 export interface LookerOAuthRedirectUris {
   actionRedirectUri: string;
   extensionUri: string;
@@ -19,11 +58,16 @@ export function resolveOAuthRedirectUris(
   cloudRunUrl?: string,
   lookerHostUrl?: string
 ): LookerOAuthRedirectUris {
-  const lookerBase = (
-    lookerHostUrl?.trim() ||
-    (typeof window !== "undefined" && window.location?.origin) ||
-    "https://looker.example.com"
-  ).replace(/\/+$/, "");
+  const winOrigin =
+    typeof window !== "undefined" &&
+    window.location?.origin &&
+    window.location.origin !== "null"
+      ? window.location.origin
+      : "";
+  const lookerBase = (lookerHostUrl?.trim() || winOrigin || "https://looker.example.com").replace(
+    /\/+$/,
+    ""
+  );
   const cloudRunBase = (cloudRunUrl?.trim() || "https://action-pptx.a.run.app").replace(
     /\/+$/,
     ""
@@ -103,6 +147,7 @@ export const ConfigPage: React.FC<ConfigPageProps> = ({
         : true,
   });
   const [actionHubSecret, setActionHubSecret] = useState("");
+  const [savedSecretDomain, setSavedSecretDomain] = useState("");
   const [copiedKey, setCopiedKey] = useState<string>("");
   const [status, setStatus] = useState<string>("");
   const patch = (next: Partial<ExtensionConfigData>) =>
@@ -110,9 +155,20 @@ export const ConfigPage: React.FC<ConfigPageProps> = ({
 
   const hostUrl = extensionSDK?.lookerHostData?.hostUrl;
   const redirectUris = resolveOAuthRedirectUris(cfg.cloudRunUrl, hostUrl);
+  const secretKeyName = String(
+    extensionSDK?.createSecretKeyTag?.("action_hub_secret") || "action_hub_secret"
+  ).replace(/[{}]/g, "");
+
+  const expectedAllowlist = buildSecretDomainAllowlist(cfg.cloudRunUrl);
+  const normalizeWl = (s: string) => s.replace(/\s+/g, "");
+  const secretIsRequired =
+    !cfg.useOAuth &&
+    (!savedSecretDomain ||
+      (Boolean(expectedAllowlist) &&
+        normalizeWl(savedSecretDomain) !== normalizeWl(expectedAllowlist)));
 
   function copyUri(key: string, text: string) {
-    void navigator.clipboard?.writeText?.(text);
+    void copyToClipboardSafe(extensionSDK, text);
     setCopiedKey(key);
     setTimeout(() => setCopiedKey((prev) => (prev === key ? "" : prev)), 1800);
   }
@@ -120,10 +176,22 @@ export const ConfigPage: React.FC<ConfigPageProps> = ({
   async function autoDiscoverFromActionHub() {
     setStatus("Inspecting Looker Action Hub integrations...");
     try {
-      const integrations: any[] = await core40SDK.ok(core40SDK.all_integrations());
-      const match = integrations.find(
+      const [integrations, hubs]: [any[], any[]] = await Promise.all([
+        core40SDK.ok(core40SDK.all_integrations({})),
+        core40SDK.ok(core40SDK.all_integration_hubs()).catch(() => []),
+      ]);
+      const hubUrlFor = (item: any): string => {
+        const hid = String(item?.integration_hub_id || String(item?.id || "").split("::")[0] || "");
+        const h = hubs.find((x) => String(x?.id || "") === hid);
+        return String(h?.url || item?.url || "").trim();
+      };
+      const candidates = integrations.filter(
         (i) => i.id?.includes("action-pptx") || i.label?.toLowerCase().includes("action-pptx")
       );
+      const match =
+        candidates.find((i) => i.enabled && !hubUrlFor(i).includes("trycloudflare")) ||
+        candidates.find((i) => i.enabled) ||
+        candidates[0];
       if (!match) {
         setStatus("No registered 'action-pptx' integration found on this Looker instance.");
         return;
@@ -131,14 +199,17 @@ export const ConfigPage: React.FC<ConfigPageProps> = ({
       const tmplParam = Array.isArray(match.params)
         ? match.params.find((p: any) => p.name === "templates_gcs_uri")
         : null;
-      const discoveredOrigin = match.url ? new URL(match.url).origin : "";
+      const rawUrl = hubUrlFor(match);
+      const discoveredOrigin = rawUrl
+        .replace(/\/actions\/pptx\/execute\/?$/, "")
+        .replace(/\/+$/, "");
       let discoveredClientId = String(match.oauth_client_id || "").trim();
       let discoveredUsesOAuth = Boolean(match.uses_oauth || discoveredClientId);
-      let discoveredPassthrough = true;
+      let discoveredPassthrough = false;
 
       if (discoveredOrigin && !discoveredClientId) {
         try {
-          const healthResp = await fetch(`${discoveredOrigin}/healthz`);
+          const healthResp = await fetch(`${discoveredOrigin}/health`);
           if (healthResp.ok) {
             const healthJson = await healthResp.json();
             if (healthJson?.oauth_client_id) {
@@ -150,7 +221,7 @@ export const ConfigPage: React.FC<ConfigPageProps> = ({
             }
           }
         } catch {
-          // ignore healthz probe failure
+          // ignore health probe failure
         }
       }
 
@@ -160,10 +231,9 @@ export const ConfigPage: React.FC<ConfigPageProps> = ({
         ...(tmplParam?.user_attribute_name
           ? { templatesUserAttributeName: String(tmplParam.user_attribute_name) }
           : {}),
-        ...(discoveredUsesOAuth
-          ? { useOAuth: true, oauthGcsPassthrough: discoveredPassthrough }
-          : {}),
-        ...(discoveredClientId ? { oauthClientId: discoveredClientId } : {}),
+        useOAuth: discoveredUsesOAuth,
+        oauthGcsPassthrough: discoveredPassthrough,
+        oauthClientId: discoveredClientId,
       });
       setStatus(
         discoveredClientId
@@ -176,6 +246,16 @@ export const ConfigPage: React.FC<ConfigPageProps> = ({
   }
 
   useEffect(() => {
+    void core40SDK
+      .ok(core40SDK.all_user_attributes({}))
+      .then((attrs: any[]) => {
+        const existing = (Array.isArray(attrs) ? attrs : []).find((a) => a?.name === secretKeyName);
+        if (existing?.value_is_hidden && existing?.hidden_value_domain_whitelist) {
+          setSavedSecretDomain(String(existing.hidden_value_domain_whitelist));
+        }
+      })
+      .catch(() => {});
+
     if (!initialConfig.cloudRunUrl) {
       void autoDiscoverFromActionHub();
     }
@@ -193,33 +273,47 @@ export const ConfigPage: React.FC<ConfigPageProps> = ({
         oauthClientId: cfg.oauthClientId?.trim() || undefined,
         oauthGcsPassthrough: cfg.oauthGcsPassthrough,
       };
-      await extensionSDK.saveContextData(nextConfig);
+      if (!nextConfig.cloudRunUrl) {
+        throw new Error("Cloud Run Service Base URL is required.");
+      }
+      if (!nextConfig.templatesGcsUri && !nextConfig.templatesUserAttributeName) {
+        throw new Error("Templates GCS URI is required.");
+      }
+      const domainAllowlist = buildSecretDomainAllowlist(nextConfig.cloudRunUrl);
+      if (!domainAllowlist) {
+        throw new Error("Cloud Run Service Base URL must be a valid http(s) URL.");
+      }
+      if (secretIsRequired && !actionHubSecret.trim()) {
+        throw new Error(
+          savedSecretDomain && normalizeWl(savedSecretDomain) !== normalizeWl(domainAllowlist)
+            ? `Service URL changed (${savedSecretDomain} → ${domainAllowlist}); re-enter Action Hub Secret to recreate the hidden attribute.`
+            : "Action Hub Secret is required when Google OAuth is disabled."
+        );
+      }
 
       if (actionHubSecret.trim()) {
-        const secretAttrName = extensionSDK.createSecretKeyTag("action_hub_secret").replace(
-          /^::|::$/g,
-          ""
-        );
-        const attrs: any[] = await core40SDK.ok(core40SDK.all_user_attributes());
-        const existing = attrs.find(
-          (a) => a.name === secretAttrName || a.name?.endsWith("_action_hub_secret")
-        );
-        const domainAllowlist = nextConfig.cloudRunUrl
-          ? `${new URL(nextConfig.cloudRunUrl).origin}/*`
-          : "*";
-        if (!existing) {
-          await core40SDK.ok(
-            core40SDK.create_user_attribute({
-              name: "action_hub_secret",
-              label: "action-pptx Secret",
-              type: "string",
-              value_is_hidden: true,
-              hidden_value_domain_whitelist: domainAllowlist,
-              default_value: actionHubSecret.trim(),
-            })
-          );
+        const attrs: any[] = await core40SDK.ok(core40SDK.all_user_attributes({}));
+        const existing = attrs.find((a) => a.name === secretKeyName);
+        if (existing?.id) {
+          await core40SDK.ok(core40SDK.delete_user_attribute(String(existing.id)));
         }
+        await core40SDK.ok(
+          core40SDK.create_user_attribute({
+            name: secretKeyName,
+            label: `${extensionSDK?.lookerHostData?.extensionId || "action-pptx"} Action Hub Secret`,
+            type: "string",
+            value_is_hidden: true,
+            hidden_value_domain_whitelist: domainAllowlist,
+            user_can_edit: false,
+            user_can_view: true,
+            default_value: actionHubSecret.trim(),
+          })
+        );
+        setSavedSecretDomain(domainAllowlist);
+        setActionHubSecret("");
       }
+
+      await extensionSDK.saveContextData(nextConfig);
 
       onSave(nextConfig);
       setStatus("Configuration saved to Extension Context Data.");
@@ -347,6 +441,7 @@ export const ConfigPage: React.FC<ConfigPageProps> = ({
         >
           <label>
             <div style={{ fontSize: 12, fontWeight: 600, color: "#cbd5e1", marginBottom: 6 }}>
+              <span style={{ color: "#ef4444", fontWeight: 700, marginRight: 4 }}>*</span>
               Cloud Run Service Base URL
             </div>
             <input
@@ -361,10 +456,12 @@ export const ConfigPage: React.FC<ConfigPageProps> = ({
 
           <label>
             <div style={{ fontSize: 12, fontWeight: 600, color: "#cbd5e1", marginBottom: 6 }}>
+              <span style={{ color: "#ef4444", fontWeight: 700, marginRight: 4 }}>*</span>
               Templates GCS URI (gs://bucket/prefix)
             </div>
             <input
               type="text"
+              required={!cfg.templatesUserAttributeName?.trim()}
               value={cfg.templatesGcsUri}
               onChange={(e) => patch({ templatesGcsUri: e.target.value })}
               placeholder="gs://my-templates-bucket/templates"
@@ -387,13 +484,28 @@ export const ConfigPage: React.FC<ConfigPageProps> = ({
 
           <label>
             <div style={{ fontSize: 12, fontWeight: 600, color: "#cbd5e1", marginBottom: 6 }}>
-              Action Hub Secret (stored in hidden scoped user attribute action_hub_secret)
+              {!cfg.useOAuth && (
+                <span style={{ color: "#ef4444", fontWeight: 700, marginRight: 4 }}>*</span>
+              )}
+              Action Hub Secret (hidden user attribute <code>{secretKeyName}</code>){" "}
+              <span style={{ color: secretIsRequired ? "#f87171" : "#34d399" }}>
+                {secretIsRequired
+                  ? savedSecretDomain
+                    ? "• Required (URL changed — recreates hidden attribute)"
+                    : "• Required"
+                  : `• Saved (${savedSecretDomain})`}
+              </span>
             </div>
             <input
               type="password"
+              required={secretIsRequired}
               value={actionHubSecret}
               onChange={(e) => setActionHubSecret(e.target.value)}
-              placeholder="Leave blank to keep existing secret"
+              placeholder={
+                secretIsRequired
+                  ? "Enter Action Hub Secret (stored hidden & domain-allowlisted)"
+                  : "Leave blank to keep existing secret, or enter a new one to replace it"
+              }
               style={inputStyle}
             />
           </label>

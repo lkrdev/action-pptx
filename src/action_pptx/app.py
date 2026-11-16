@@ -31,7 +31,7 @@ from action_pptx.config import (
 )
 from pptx_merge.engine import MergeError, merge_pptx
 from pptx_merge.inspector import TileSchema, inspect_and_validate
-from pptx_merge.themes import PPTX_THEMES, resolve_pptx_theme
+from pptx_merge.themes import PPTX_THEMES, resolve_pptx_theme, theme_from_looker_palette
 
 ACTION_NAME = "action-pptx"
 ACTION_ICON_SVG = (
@@ -118,6 +118,7 @@ class TemplatePreviewRequest(BaseModel):
     plan_title: str = "Dashboard Preview"
     plan_url: str = ""
     theme: str | None = None
+    theme_palette: dict[str, object] | None = None
 
 
 def _resolve_base_url(request: Request, settings: Settings) -> str:
@@ -135,7 +136,7 @@ def _action_definition(base_url: str, settings: Settings) -> dict[str, object]:
     uses_oauth = bool(settings.google_oauth_client_id)
     return {
         "name": ACTION_NAME,
-        "label": "PowerPoint Template Merge (action-pptx)",
+        "label": settings.action_label if settings else "PowerPoint Template Merge",
         "icon_data_uri": ACTION_ICON_DATA_URI,
         "description": (
             "Populate native, editable PowerPoint (.pptx) templates from LookML Dashboards."
@@ -166,6 +167,20 @@ def _action_definition(base_url: str, settings: Settings) -> dict[str, object]:
                     "GCS bucket/prefix where generated timestamped .pptx files are written."
                 ),
             },
+            *(
+                [
+                    {
+                        "name": "action_access_param",
+                        "label": "Action Access",
+                        "description": "Controls which users can access this action.",
+                        "user_attribute_name": settings.required_user_attribute,
+                        "required": True,
+                        "sensitive": True,
+                    }
+                ]
+                if settings and settings.required_user_attribute
+                else []
+            ),
         ],
         "url": f"{base}/actions/pptx/execute",
         "form_url": f"{base}/actions/pptx/form",
@@ -471,6 +486,18 @@ def create_app() -> FastAPI:
         _require_action_auth(authorization, settings)
         base = _resolve_base_url(request, settings)
 
+        if (
+            settings.required_user_attribute
+            and payload.data.get("test") is not True
+            and not str(payload.data.get("action_access_param") or "").strip()
+        ):
+            return {
+                "error": (
+                    f"Access denied: Looker user attribute '{settings.required_user_attribute}' "
+                    "is required to use this action."
+                )
+            }
+
         state_json = str(payload.data.get("state_json") or "").strip()
         has_oauth_flow_urls = bool(
             payload.state_redir_url
@@ -574,6 +601,19 @@ def create_app() -> FastAPI:
                 webhook_id,
                 success=False,
                 message=f"Unsupported action type '{payload.type}'; expected 'dashboard'.",
+            )
+
+        if (
+            settings.required_user_attribute
+            and not str(payload.data.get("action_access_param") or "").strip()
+        ):
+            return _looker_response(
+                webhook_id,
+                success=False,
+                message=(
+                    f"Access denied: Looker user attribute '{settings.required_user_attribute}' "
+                    "is required to execute this action."
+                ),
             )
 
         state_json = str(payload.data.get("state_json") or "").strip()
@@ -781,12 +821,17 @@ def create_app() -> FastAPI:
             "scheduled_plan_id": "preview",
             "webhook_id": "preview",
         }
+        preview_theme = (
+            theme_from_looker_palette(payload.theme or "Looker_Theme", payload.theme_palette)
+            if payload.theme_palette
+            else payload.theme
+        )
         try:
             merge_res = merge_pptx(
                 pptx_bytes,
                 zip_buf.getvalue(),
                 plan_meta=plan_meta,
-                theme=payload.theme,
+                theme=preview_theme,
             )
         except (MergeError, ValueError) as exc:
             return JSONResponse(status_code=422, content={"error": str(exc)})

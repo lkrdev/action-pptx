@@ -1245,16 +1245,16 @@ def build_embed_demo_template_bytes() -> bytes:
         accent=ACCENT_ROSE,
     )
     churn_tbl_shape = s3.shapes.add_table(
-        2, 4, Inches(6.27), Inches(3.38), Inches(6.34), Inches(0.68)
+        2, 3, Inches(6.27), Inches(3.38), Inches(6.34), Inches(0.68)
     )
     churn_tbl_shape.name = "table:return_&_cancellation_hotspots_by_category"
     ct = churn_tbl_shape.table
     _strip_default_table_style(ct)
     ct.rows[0].height = Inches(0.34)
     ct.rows[1].height = Inches(0.34)
-    for c_idx, w in enumerate([Inches(2.34), Inches(1.30), Inches(1.30), Inches(1.40)]):
+    for c_idx, w in enumerate([Inches(2.94), Inches(1.70), Inches(1.70)]):
         ct.columns[c_idx].width = w
-    for c_idx, h_text in enumerate(["CATEGORY", "RETURNED", "CANCELLED", "CHURN RATIO"]):
+    for c_idx, h_text in enumerate(["CATEGORY", "COUNT RETURNED", "COUNT CANCELLED"]):
         _style_cell(
             ct.cell(0, c_idx),
             h_text,
@@ -1268,18 +1268,17 @@ def build_embed_demo_template_bytes() -> bytes:
     for c_idx, tag_text in enumerate(
         [
             "{{.Category}}",
-            "{{.Returned Count | #,##0}}",
-            "{{.Cancelled Count | #,##0}}",
-            "{{.Transaction Churn Ratio | 0.0%}}",
+            "{{.Count Returned | #,##0}}",
+            "{{.Count Cancelled | #,##0}}",
         ]
     ):
         _style_cell(
             ct.cell(1, c_idx),
             tag_text,
             bg=ROW_ALT_B,
-            fg=ACCENT_ROSE if c_idx == 3 else (TEXT_WHITE if c_idx == 0 else TEXT_LIGHT),
+            fg=ACCENT_ROSE if c_idx == 2 else (TEXT_WHITE if c_idx == 0 else TEXT_LIGHT),
             size=9.5,
-            bold=c_idx in (0, 3),
+            bold=c_idx in (0, 2),
             align=PP_ALIGN.LEFT if c_idx == 0 else PP_ALIGN.RIGHT,
         )
 
@@ -1351,12 +1350,12 @@ def build_embed_demo_csv_zip_bytes() -> bytes:
                 "Cancelled,790\n"
             ),
             "return_&_cancellation_hotspots_by_category.csv": (
-                "Category,Returned Count,Cancelled Count,Transaction Churn Ratio\n"
-                "Jeans,380,210,0.109\n"
-                "Outerwear & Coats,290,175,0.146\n"
-                "Sweaters,220,160,0.098\n"
-                "Tops & Tees,175,140,0.068\n"
-                "Accessories,115,105,0.075\n"
+                "Category,Count Returned,Count Cancelled\n"
+                "Jeans,380,210\n"
+                "Outerwear & Coats,290,175\n"
+                "Sweaters,220,160\n"
+                "Tops & Tees,175,140\n"
+                "Accessories,115,105\n"
             ),
         }
     )

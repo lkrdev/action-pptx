@@ -24,6 +24,7 @@
     explore: inventory_items
     type: looker_grid
     fields: [inventory_items.metric_sort, inventory_items.metric, inventory_items.prior, inventory_items.current, inventory_items.delta]
+    hidden_fields: [inventory_items.metric_sort]
     sorts: [inventory_items.metric_sort asc]
     limit: 10
     show_view_names: false
@@ -38,6 +39,7 @@
     explore: inventory_items
     type: looker_pie
     fields: [inventory_items.cat_sort, inventory_items.product_category, inventory_items.cat_total_spend]
+    hidden_fields: [inventory_items.cat_sort]
     sorts: [inventory_items.cat_sort asc]
     limit: 10
     show_view_names: false
@@ -80,6 +82,7 @@
     explore: inventory_items
     type: looker_column
     fields: [inventory_items.bridge_sort, inventory_items.bridge_step, inventory_items.bridge_base, inventory_items.bridge_impact]
+    hidden_fields: [inventory_items.bridge_sort]
     sorts: [inventory_items.bridge_sort asc]
     limit: 10
     show_view_names: false
@@ -94,6 +97,7 @@
     explore: inventory_items
     type: looker_bar
     fields: [inventory_items.region_sort, inventory_items.region, inventory_items.prior_customers, inventory_items.current_customers]
+    hidden_fields: [inventory_items.region_sort]
     sorts: [inventory_items.region_sort asc]
     limit: 10
     show_view_names: false
@@ -108,6 +112,7 @@
     explore: inventory_items
     type: looker_grid
     fields: [inventory_items.brand_sort, inventory_items.brand_name, inventory_items.brand_category, inventory_items.units_sold, inventory_items.net_revenue, inventory_items.yoy_trend]
+    hidden_fields: [inventory_items.brand_sort]
     sorts: [inventory_items.brand_sort asc]
     limit: 10
     show_view_names: false
@@ -122,6 +127,7 @@
     explore: inventory_items
     type: looker_grid
     fields: [inventory_items.account_sort, inventory_items.account_tier, inventory_items.primary_segment, inventory_items.orders, inventory_items.total_revenue]
+    hidden_fields: [inventory_items.account_sort]
     sorts: [inventory_items.account_sort asc]
     limit: 10
     show_view_names: false

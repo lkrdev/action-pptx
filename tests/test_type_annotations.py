@@ -71,7 +71,7 @@ def test_readme_manifest_matches_manifest_lkml() -> None:
     """Verify that the ```lookml block in README.md exactly matches manifest.lkml."""
     manifest_file = REPO_ROOT / "manifest.lkml"
     readme_file = REPO_ROOT / "README.md"
-    example_manifest = REPO_ROOT / "examples" / "lookml" / "manifest.lkml"
+    example_manifest = REPO_ROOT / "assets" / "lookml" / "manifest.lkml"
     assert manifest_file.exists(), "manifest.lkml not found at repository root"
     assert readme_file.exists(), "README.md not found at repository root"
 
@@ -85,5 +85,5 @@ def test_readme_manifest_matches_manifest_lkml() -> None:
     )
     if example_manifest.exists():
         assert manifest_text in example_manifest.read_text(encoding="utf-8"), (
-            "examples/lookml/manifest.lkml does not contain the root manifest.lkml block!"
+            "assets/lookml/manifest.lkml does not contain the root manifest.lkml block!"
         )
