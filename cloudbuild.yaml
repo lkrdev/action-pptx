@@ -1,0 +1,13 @@
+steps:
+  - name: ghcr.io/astral-sh/uv:python3.14-bookworm-slim
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        uv sync --frozen
+        uv run --frozen ruff check .
+        uv run --frozen ruff format --check .
+        uv run --frozen ty check
+        uv run --frozen pytest
+options:
+  logging: CLOUD_LOGGING_ONLY

@@ -1,0 +1,38 @@
+repos:
+  - repo: https://github.com/astral-sh/uv-pre-commit
+    rev: 0.7.12
+    hooks:
+      - id: uv-lock
+        args: ["--default-index", "https://pypi.org/simple", "--no-config"]
+  - repo: local
+    hooks:
+      - id: uv-lock-index
+        name: check uv.lock index
+        entry: bash -c 'if grep -Fq "airlock-proxy.uplink" uv.lock || grep -Fq "artifact-foundry-prod" uv.lock; then echo "uv.lock needs default index, not proprietary"; exit 1; fi'
+        language: system
+        pass_filenames: false
+      - id: ruff-check
+        name: ruff check
+        entry: uv run --frozen ruff check .
+        language: system
+        pass_filenames: false
+      - id: ruff-format
+        name: ruff format check
+        entry: uv run --frozen ruff format --check .
+        language: system
+        pass_filenames: false
+      - id: ty-check
+        name: ty check
+        entry: uv run --frozen ty check
+        language: system
+        pass_filenames: false
+      - id: no-plain-dict
+        name: check no plain dict annotations, clean uv.lock, and manifest.lkml sync
+        entry: uv run --frozen pytest tests/test_type_annotations.py --no-cov -q
+        language: system
+        pass_filenames: false
+      - id: test-and-coverage
+        name: pytest & coverage
+        entry: uv run --frozen pytest --cov=src --cov-report=term-missing
+        language: system
+        pass_filenames: false

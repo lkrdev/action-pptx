@@ -1,0 +1,126 @@
+name: Release
+
+on:
+  release:
+    types: [created]
+
+env:
+  REGION: us-central1
+  SERVICE_NAME: action-pptx
+  DOCKER_REPO: looker-action
+  APP_NAME: action-pptx
+  TYPE: apps
+  BUCKET_NAME: ${{ secrets.CDN_BUCKET_NAME }}
+  TAG: ${{ github.event.release.tag_name }}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: "read"
+      id-token: "write"
+
+    steps:
+      - name: Set IMAGE_NAME
+        run: echo "IMAGE_NAME=${{ env.REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.DOCKER_REPO }}/${{ env.SERVICE_NAME }}" >> $GITHUB_ENV
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Build and push Docker image
+        run: |
+          gcloud builds submit . \
+            --project ${{ secrets.GCP_PROJECT_ID }} \
+            --tag ${{ env.IMAGE_NAME }}:${{ env.TAG }} \
+            --gcs-log-dir=gs://${{ secrets.GCP_LOGS_BUCKET_NAME }}/${{ env.DOCKER_REPO }}
+
+      - name: Add latest tag
+        run: |
+          gcloud artifacts docker tags add ${{ env.IMAGE_NAME }}:${{ env.TAG }} \
+            ${{ env.IMAGE_NAME }}:latest \
+            --project ${{ secrets.GCP_PROJECT_ID }}
+
+  build-and-upload-frontend:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: "write"
+      id-token: "write"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+
+      - name: Install dependencies
+        working-directory: extension
+        run: npm install
+
+      - name: Build frontend
+        working-directory: extension
+        run: npm run build
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Upload frontend bundle to GCS tag
+        uses: google-github-actions/upload-cloud-storage@v2
+        with:
+          process_gcloudignore: false
+          path: extension/dist
+          destination: ${{ env.BUCKET_NAME }}/${{ env.TYPE }}/${{ env.APP_NAME }}/${{ env.TAG }}
+          parent: false
+
+      - name: Upload frontend bundle to GCS latest
+        uses: google-github-actions/upload-cloud-storage@v2
+        with:
+          process_gcloudignore: false
+          path: extension/dist
+          destination: ${{ env.BUCKET_NAME }}/${{ env.TYPE }}/${{ env.APP_NAME }}/latest
+          parent: false
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Invalidate Cloud CDN
+        run: |
+          gcloud compute url-maps invalidate-cdn-cache ${{ secrets.CDN_URL_MAP }} \
+            --project ${{ secrets.GCP_PROJECT_ID }} \
+            --path=/${{ env.TYPE }}/${{ env.APP_NAME }}/latest/* \
+            --async
+
+      - name: Update Release Description with CDN Links
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CDN_HOST: ${{ vars.CDN_HOST || 'https://cdn.lkr.dev' }}
+        run: |
+          V_LINKS=""
+          L_LINKS=""
+          for f in extension/dist/*.js; do
+            file="${f#extension/dist/}"
+            V_LINKS+="- ${CDN_HOST}/${{ env.TYPE }}/${{ env.APP_NAME }}/${{ env.TAG }}/${file}"$'\n'
+            L_LINKS+="- ${CDN_HOST}/${{ env.TYPE }}/${{ env.APP_NAME }}/latest/${file}"$'\n'
+          done
+
+          CDN_LINKS="### 🚀 CDN Assets"$'\n\n'"**Version (${{ env.TAG }}):**"$'\n'"${V_LINKS}"$'\n'"**Latest:**"$'\n'"${L_LINKS}"
+
+          EXISTING_BODY=$(gh release view "${{ env.TAG }}" --json body -q .body)
+          NEW_BODY="${CDN_LINKS}"$'\n'"---"$'\n\n'"${EXISTING_BODY}"
+
+          gh release edit "${{ env.TAG }}" --notes "$NEW_BODY"
+          echo "$CDN_LINKS" >> "$GITHUB_STEP_SUMMARY"

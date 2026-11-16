@@ -1,0 +1,26 @@
+{
+  "name": "action-pptx-extension",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Looker Template Manager Extension for action-pptx",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "webpack --mode production"
+  },
+  "dependencies": {
+    "@looker/extension-sdk": "^24.18.0",
+    "@looker/sdk": "^24.18.0",
+    "@looker/sdk-rtl": "^21.6.1",
+    "pptx-preview": "^1.0.7",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "ts-loader": "^9.5.1",
+    "typescript": "^5.6.3",
+    "webpack": "^5.96.1",
+    "webpack-cli": "^5.1.4"
+  }
+}

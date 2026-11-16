@@ -1,0 +1,116 @@
+name: Merge to Main
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  REGION: us-central1
+  SERVICE_NAME: action-pptx
+  DOCKER_REPO: looker-action
+  APP_NAME: action-pptx
+  TYPE: apps
+  BUCKET_NAME: ${{ secrets.CDN_BUCKET_NAME }}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: "read"
+      id-token: "write"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set TAG
+        run: echo "TAG=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+
+      - name: Set IMAGE_NAME
+        run: echo "IMAGE_NAME=${{ env.REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.DOCKER_REPO }}/${{ env.SERVICE_NAME }}" >> $GITHUB_ENV
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Build and push Docker image
+        run: |
+          gcloud builds submit . \
+            --project ${{ secrets.GCP_PROJECT_ID }} \
+            --tag ${{ env.IMAGE_NAME }}:${{ env.TAG }} \
+            --gcs-log-dir=gs://${{ secrets.GCP_LOGS_BUCKET_NAME }}/${{ env.DOCKER_REPO }}
+
+      - name: Save Image Name
+        run: echo "${{ env.IMAGE_NAME }}:${{ env.TAG }}" > image-name.txt
+
+      - name: Upload Image Name Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image-name
+          path: image-name.txt
+
+  build-and-upload-frontend:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: "write"
+      pull-requests: "write"
+      id-token: "write"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+
+      - name: Install dependencies
+        working-directory: extension
+        run: npm install
+
+      - name: Build frontend
+        working-directory: extension
+        run: npm run build
+
+      - name: Calculate short SHA
+        id: vars
+        run: echo "short_sha=${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Upload frontend bundle to GCS commit ref
+        uses: google-github-actions/upload-cloud-storage@v2
+        with:
+          process_gcloudignore: false
+          path: extension/dist
+          destination: ${{ env.BUCKET_NAME }}/${{ env.TYPE }}/${{ env.APP_NAME }}/${{ steps.vars.outputs.short_sha }}
+          parent: false
+
+      - name: Output CDN Links
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CDN_HOST: ${{ vars.CDN_HOST || 'https://cdn.lkr.dev' }}
+        run: |
+          SHORT="${GITHUB_SHA:0:7}"
+          BODY="### 🚀 CDN Deployment Links"$'\n\n'"**Commit (${SHORT}):**"$'\n'
+          for f in extension/dist/*.js; do
+            BODY+="- ${CDN_HOST}/${{ env.TYPE }}/${{ env.APP_NAME }}/${SHORT}/${f#extension/dist/}"$'\n'
+          done
+
+          echo "$BODY" >> "$GITHUB_STEP_SUMMARY"
+          gh api "repos/${{ github.repository }}/commits/${GITHUB_SHA}/comments" -f body="$BODY"
+          PR=$(gh pr list --repo "${{ github.repository }}" --state merged --search "$GITHUB_SHA" --json number -q '.[0].number')
+          if [ -n "$PR" ]; then
+            gh pr comment "$PR" --repo "${{ github.repository }}" --body "$BODY"
+          fi
