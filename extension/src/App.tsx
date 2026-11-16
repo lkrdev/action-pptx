@@ -21,6 +21,15 @@ import {
 interface AppProps {
   core40SDK: any;
   extensionSDK: any;
+  initialRoute?: string;
+  onHostRouteChange?: (listener: (route: string) => void) => () => void;
+}
+
+function normalizeRoute(raw?: string): string {
+  const cleaned = (raw || "").trim().replace(/\/+$/, "");
+  if (cleaned === "/config" || cleaned.endsWith("/config")) return "/config";
+  if (cleaned === "/viewer" || cleaned.endsWith("/viewer")) return "/viewer";
+  return "/";
 }
 
 export const OAUTH_STORAGE_KEY = "action_pptx_oauth_session";
@@ -222,6 +231,77 @@ const IconSkipEnd = () => (
     <line x1="19" y1="5" x2="19" y2="19" />
   </Svg>
 );
+const IconSearch = () => (
+  <Svg size={14}>
+    <circle cx="11" cy="11" r="8" />
+    <path d="m21 21-4.3-4.3" />
+  </Svg>
+);
+const IconRefresh = () => (
+  <Svg size={14}>
+    <path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8" />
+    <path d="M21 3v5h-5" />
+  </Svg>
+);
+
+interface OutputReportItem {
+  name: string;
+  size: number;
+  updated: string;
+}
+
+type ViewerMode = "outputs" | "templates";
+
+const VIEWER_MODE_META: Record<
+  ViewerMode,
+  {
+    tabLabel: string;
+    searchPlaceholder: string;
+    dateColumn: string;
+    emptyText: string;
+    missingUriText: string;
+    listPath: string;
+    downloadPath: string;
+    uriField: string;
+  }
+> = {
+  outputs: {
+    tabLabel: "Rendered PowerPoints",
+    searchPlaceholder: "Search rendered PowerPoints by filename...",
+    dateColumn: "Generated",
+    emptyText: "No matching .pptx reports found.",
+    missingUriText: "Configure an Output GCS URI in /config to view rendered PowerPoints.",
+    listPath: "/outputs/list",
+    downloadPath: "/outputs/download",
+    uriField: "output_gcs_uri",
+  },
+  templates: {
+    tabLabel: "Templates",
+    searchPlaceholder: "Search templates by filename...",
+    dateColumn: "Updated",
+    emptyText: "No matching .pptx templates found.",
+    missingUriText: "Configure a Templates GCS URI in /config to view templates.",
+    listPath: "/templates/list",
+    downloadPath: "/templates/download",
+    uriField: "templates_gcs_uri",
+  },
+};
+
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function downloadPptxBase64(b64: string, outName: string): void {
+  const link = document.createElement("a");
+  link.href = `data:application/vnd.openxmlformats-officedocument.presentationml.presentation;base64,${b64}`;
+  link.download = outName;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+}
 
 interface StoredOAuthSession {
   token: string;
@@ -316,25 +396,42 @@ function base64ToArrayBuffer(b64: string): ArrayBuffer {
   return bytes.buffer;
 }
 
-export const App: React.FC<AppProps> = ({ core40SDK, extensionSDK }) => {
-  const [route, setRoute] = useState<string>(() => {
-    const hostRoute = String(extensionSDK?.lookerHostData?.route || "").trim();
-    if (hostRoute && hostRoute !== "/") return hostRoute;
-    const hash = window.location.hash.replace(/^#/, "");
-    if (hash) return hash;
-    return window.location.pathname.endsWith("/config") ? "/config" : "/";
-  });
+export const App: React.FC<AppProps> = ({
+  core40SDK,
+  extensionSDK,
+  initialRoute,
+  onHostRouteChange,
+}) => {
+  const [route, setRoute] = useState<string>(() =>
+    normalizeRoute(
+      initialRoute ??
+        extensionSDK?.lookerHostData?.route ??
+        window.location.pathname
+    )
+  );
   const [config, setConfig] = useState<ExtensionConfigData>(() => {
     const ctx = extensionSDK?.getContextData?.() as ExtensionConfigData | undefined;
     return {
       cloudRunUrl: ctx?.cloudRunUrl || "",
       templatesGcsUri: ctx?.templatesGcsUri || "",
+      outputGcsUri: ctx?.outputGcsUri || "",
       templatesUserAttributeName: ctx?.templatesUserAttributeName,
       useOAuth: Boolean(ctx?.useOAuth),
       oauthClientId: ctx?.oauthClientId,
       oauthGcsPassthrough: ctx?.oauthGcsPassthrough ?? true,
     };
   });
+  const [serverViewerEnabled, setServerViewerEnabled] = useState<boolean>(false);
+  const [viewerMode, setViewerMode] = useState<ViewerMode>("outputs");
+  const [viewerSourceUri, setViewerSourceUri] = useState<string>("");
+  const [viewerFiles, setViewerFiles] = useState<OutputReportItem[]>([]);
+  const [viewerSearch, setViewerSearch] = useState<string>("");
+  const [viewerSortKey, setViewerSortKey] = useState<"name" | "size" | "updated">("updated");
+  const [viewerSortAsc, setViewerSortAsc] = useState<boolean>(false);
+  const [viewerLoadingList, setViewerLoadingList] = useState<boolean>(false);
+  const [viewerLoadingFile, setViewerLoadingFile] = useState<string>("");
+  const [viewerFileName, setViewerFileName] = useState<string>("");
+  const [viewerPptxBase64, setViewerPptxBase64] = useState<string>("");
 
   const [lookerThemes, setLookerThemes] = useState<LookerThemeOption[]>(FALLBACK_LOOKER_THEMES);
   const [selectedThemeName, setSelectedThemeName] = useState<string>("Levis_Dark");
@@ -383,6 +480,14 @@ export const App: React.FC<AppProps> = ({ core40SDK, extensionSDK }) => {
   );
 
   const ui = getUiPalette(activeThemeOption?.palette?.accent, isDark);
+  const canOpenViewer = Boolean(config.outputGcsUri?.trim()) && serverViewerEnabled;
+  const activePreviewBase64 = route === "/viewer" ? viewerPptxBase64 : mergedPptxBase64;
+
+  function navigateTo(nextRoute: string) {
+    const normalized = normalizeRoute(nextRoute);
+    setActionError("");
+    setRoute(normalized);
+  }
 
   useEffect(() => {
     const initialClientId = config.oauthClientId || "";
@@ -409,27 +514,63 @@ export const App: React.FC<AppProps> = ({ core40SDK, extensionSDK }) => {
       }
     });
 
-    const onHashChange = () => {
-      setRoute(window.location.hash.replace(/^#/, "") || "/");
+    const onPopState = () => {
+      setRoute(normalizeRoute(window.location.pathname));
     };
     const onLookerRoute = (e: Event) => {
-      const next = String((e as CustomEvent).detail || "/").trim() || "/";
-      setRoute(next);
+      setRoute(normalizeRoute(String((e as CustomEvent).detail || "/")));
     };
-    window.addEventListener("hashchange", onHashChange);
+    const unsubscribeHostRoute = onHostRouteChange?.((nextRoute) => {
+      setRoute(normalizeRoute(nextRoute));
+    });
+    window.addEventListener("popstate", onPopState);
     window.addEventListener("looker-route", onLookerRoute);
 
     return () => {
-      window.removeEventListener("hashchange", onHashChange);
+      window.removeEventListener("popstate", onPopState);
       window.removeEventListener("looker-route", onLookerRoute);
+      unsubscribeHostRoute?.();
     };
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!config.cloudRunUrl || !config.outputGcsUri?.trim()) {
+      setServerViewerEnabled(false);
+      return;
+    }
+    void fetch(`${config.cloudRunUrl}/health`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (!cancelled) setServerViewerEnabled(Boolean(data?.report_viewer_enabled));
+      })
+      .catch(() => {
+        if (!cancelled) setServerViewerEnabled(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [config.cloudRunUrl, config.outputGcsUri]);
+
+  useEffect(() => {
+    if (route === "/viewer" && canOpenViewer && (!config.useOAuth || oauthToken)) {
+      void loadViewerFiles(viewerMode);
+    }
+  }, [
+    route,
+    viewerMode,
+    canOpenViewer,
+    config.outputGcsUri,
+    config.templatesGcsUri,
+    config.templatesUserAttributeName,
+    oauthToken,
+  ]);
 
   // Sticky check/error popover: stays open until user clicks outside or presses Escape
   useDismissOnOutsideOrEscape(checkPopoverOpen, checkPopoverRef, () => setCheckPopoverOpen(false));
 
   useEffect(() => {
-    if (!mergedPptxBase64 || !previewContainerRef.current) return;
+    if (!activePreviewBase64 || !previewContainerRef.current) return;
     const container = previewContainerRef.current;
     container.innerHTML = "";
     const previewer = initPptxPreview(container, {
@@ -438,14 +579,14 @@ export const App: React.FC<AppProps> = ({ core40SDK, extensionSDK }) => {
       mode: "list",
     });
     previewerRef.current = previewer;
-    void previewer.load(base64ToArrayBuffer(mergedPptxBase64)).then(() => {
+    void previewer.load(base64ToArrayBuffer(activePreviewBase64)).then(() => {
       const count = Number(previewer.slideCount) || 1;
       setTotalSlides(count);
       const targetIdx = Math.max(0, Math.min(count - 1, desiredSlideRef.current));
       setCurrentSlide(targetIdx);
       previewer.renderSingleSlide(targetIdx);
     });
-  }, [mergedPptxBase64]);
+  }, [activePreviewBase64, route]);
 
   function goToSlide(index: number) {
     if (!previewerRef.current || totalSlides <= 0) return;
@@ -463,14 +604,19 @@ export const App: React.FC<AppProps> = ({ core40SDK, extensionSDK }) => {
     previewerRef.current = null;
     desiredSlideRef.current = 0;
     setPreviewLoading(false);
-    setMergedPptxBase64("");
+    if (route === "/viewer") {
+      setViewerPptxBase64("");
+      setViewerFileName("");
+    } else {
+      setMergedPptxBase64("");
+    }
     setCurrentSlide(0);
     setTotalSlides(0);
   }
 
   async function handleOAuthLogin(): Promise<string> {
     if (!config.oauthClientId) {
-      setRoute("/config");
+      navigateTo("/config");
       throw new Error("OAuth Client ID is not configured.");
     }
     setOauthSigningIn(true);
@@ -537,7 +683,7 @@ export const App: React.FC<AppProps> = ({ core40SDK, extensionSDK }) => {
 
   async function callCloudRun(path: string, body: Record<string, any>): Promise<any> {
     if (!config.cloudRunUrl) {
-      setRoute("/config");
+      navigateTo("/config");
       throw new Error("Service is not configured yet.");
     }
     const url = `${config.cloudRunUrl}${path}`;
@@ -551,11 +697,15 @@ export const App: React.FC<AppProps> = ({ core40SDK, extensionSDK }) => {
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
         body: JSON.stringify(body),
       });
-      if (resp.status === 401 || resp.status === 403) {
-        clearOAuthSession(extensionSDK);
-        setOauthToken("");
+      if (!resp.ok) {
         const errBody = await resp.json().catch(() => ({}));
-        throw new Error(errBody?.detail || `Session expired (${resp.status}). Please sign in again.`);
+        const detail = String(errBody?.detail || "");
+        if (resp.status === 401 || (resp.status === 403 && !detail.includes("disabled by server"))) {
+          clearOAuthSession(extensionSDK);
+          setOauthToken("");
+          throw new Error(detail || `Session expired (${resp.status}). Please sign in again.`);
+        }
+        throw new Error(detail || `Request failed (${resp.status}).`);
       }
       return await resp.json();
     }
@@ -566,10 +716,113 @@ export const App: React.FC<AppProps> = ({ core40SDK, extensionSDK }) => {
       headers: { "Content-Type": "application/json", Authorization: `Token token="${secretTag}"` },
       body: JSON.stringify(body),
     });
-    if (resp.status >= 400 && typeof resp.body === "string") {
-      throw new Error(resp.body || `Request failed (${resp.status})`);
+    if (resp.status >= 400) {
+      throw new Error(resp.body?.detail || resp.body || `Request failed (${resp.status})`);
     }
     return resp.body;
+  }
+
+  async function resolveTemplatesGcsUri(): Promise<string> {
+    const direct = config.templatesGcsUri?.trim();
+    if (direct) return direct;
+    if (config.templatesUserAttributeName && extensionSDK?.userAttributeGetItem) {
+      const val = await extensionSDK.userAttributeGetItem(config.templatesUserAttributeName);
+      return String(val || "").trim();
+    }
+    return "";
+  }
+
+  async function resolveViewerBucketUri(mode: ViewerMode = viewerMode): Promise<string> {
+    return mode === "templates" ? resolveTemplatesGcsUri() : (config.outputGcsUri?.trim() || "");
+  }
+
+  function handleSwitchViewerMode(nextMode: ViewerMode) {
+    if (nextMode === viewerMode) return;
+    handleEndPreview();
+    setViewerFiles([]);
+    setViewerSourceUri("");
+    setActionError("");
+    setViewerMode(nextMode);
+  }
+
+  async function loadViewerFiles(mode: ViewerMode = viewerMode) {
+    const bucketUri = await resolveViewerBucketUri(mode);
+    setViewerSourceUri(bucketUri);
+    if (!bucketUri) {
+      setViewerFiles([]);
+      return;
+    }
+    const meta = VIEWER_MODE_META[mode];
+    setViewerLoadingList(true);
+    setActionError("");
+    try {
+      const res = await callCloudRun(meta.listPath, {
+        [meta.uriField]: bucketUri,
+      });
+      setViewerFiles(Array.isArray(res?.files) ? res.files : []);
+    } catch (err: any) {
+      setActionError(`Could not list files: ${err?.message || err}`);
+    } finally {
+      setViewerLoadingList(false);
+    }
+  }
+
+  async function fetchViewerReport(
+    name: string,
+    mode: ViewerMode = viewerMode
+  ): Promise<{ filename: string; pptxBase64: string }> {
+    const bucketUri = viewerSourceUri || (await resolveViewerBucketUri(mode));
+    const meta = VIEWER_MODE_META[mode];
+    if (!bucketUri) throw new Error(meta.missingUriText);
+    const res = await callCloudRun(meta.downloadPath, {
+      [meta.uriField]: bucketUri,
+      filename: name,
+    });
+    if (!res?.pptx_base64) {
+      throw new Error("Server response did not contain presentation data.");
+    }
+    return { filename: String(res.filename || name), pptxBase64: String(res.pptx_base64) };
+  }
+
+  async function handleLoadViewerReport(name: string) {
+    setViewerLoadingFile(name);
+    setActionError("");
+    try {
+      const { filename, pptxBase64: b64 } = await fetchViewerReport(name);
+      desiredSlideRef.current = 0;
+      setViewerFileName(filename);
+      setViewerPptxBase64(b64);
+    } catch (err: any) {
+      setActionError(`Could not load "${name}": ${err?.message || err}`);
+    } finally {
+      setViewerLoadingFile("");
+    }
+  }
+
+  async function handleDownloadViewerReport(name: string) {
+    if (viewerFileName === name && viewerPptxBase64) {
+      downloadPptxBase64(viewerPptxBase64, name);
+      return;
+    }
+    setViewerLoadingFile(name);
+    setActionError("");
+    try {
+      const { filename, pptxBase64: b64 } = await fetchViewerReport(name);
+      downloadPptxBase64(b64, filename);
+    } catch (err: any) {
+      setActionError(`Could not download "${name}": ${err?.message || err}`);
+    } finally {
+      setViewerLoadingFile("");
+    }
+  }
+
+  function toggleViewerSort(key: "name" | "size" | "updated") {
+    if (viewerSortKey === key) {
+      setViewerSortAsc((prev) => !prev);
+    } else {
+      setViewerSortKey(key);
+      setViewerSortAsc(key === "name");
+    }
   }
 
   async function handleValidate() {
@@ -726,12 +979,7 @@ export const App: React.FC<AppProps> = ({ core40SDK, extensionSDK }) => {
     const suffix =
       selectedThemeName === TEMPLATE_ORIGINAL_THEME ? "filled" : selectedThemeName;
     const outName = fileName.replace(/\.pptx$/i, "") + `_${suffix}.pptx`;
-    const link = document.createElement("a");
-    link.href = `data:application/vnd.openxmlformats-officedocument.presentationml.presentation;base64,${mergedPptxBase64}`;
-    link.download = outName;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+    downloadPptxBase64(mergedPptxBase64, outName);
   }
 
   async function handleUpload() {
@@ -740,11 +988,7 @@ export const App: React.FC<AppProps> = ({ core40SDK, extensionSDK }) => {
     setActionError("");
     setSavedNotice("");
     try {
-      const targetUri =
-        config.templatesGcsUri ||
-        (config.templatesUserAttributeName
-          ? await extensionSDK.userAttributeGetItem(config.templatesUserAttributeName)
-          : "");
+      const targetUri = await resolveTemplatesGcsUri();
       const res = await callCloudRun("/templates/upload", {
         filename: fileName,
         pptx_base64: pptxBase64,
@@ -804,16 +1048,10 @@ export const App: React.FC<AppProps> = ({ core40SDK, extensionSDK }) => {
         initialConfig={config}
         onSave={(next) => {
           setConfig(next);
-          if (window.location.hash === "#/config") {
-            window.location.hash = "";
-          }
-          setRoute("/");
+          navigateTo("/");
         }}
         onBack={() => {
-          if (window.location.hash === "#/config") {
-            window.location.hash = "";
-          }
-          setRoute("/");
+          navigateTo("/");
         }}
       />
     );
@@ -910,6 +1148,7 @@ export const App: React.FC<AppProps> = ({ core40SDK, extensionSDK }) => {
   }
 
   const selectedDashTitle = selectedDashboardTitle || "Open Dashboard";
+  const isViewerRoute = effectiveRoute === "/viewer";
   const hasErrors = Boolean(actionError) || Boolean(report && !report.valid);
   const isCheckPassed = Boolean(report?.valid) && !actionError;
   const showStatusIcon = hasErrors || isCheckPassed;
@@ -922,6 +1161,170 @@ export const App: React.FC<AppProps> = ({ core40SDK, extensionSDK }) => {
       ? `Template Ready — Matched ${report.bindings?.length || 0} items across ${report.slide_count} slides (click for details)`
       : "";
 
+  const viewerQuery = viewerSearch.trim().toLowerCase();
+  const filteredViewerFiles = viewerFiles
+    .filter((f) => !viewerQuery || f.name.toLowerCase().includes(viewerQuery))
+    .slice()
+    .sort((a, b) => {
+      let cmp = 0;
+      if (viewerSortKey === "size") cmp = (a.size || 0) - (b.size || 0);
+      else if (viewerSortKey === "updated") cmp = (a.updated || "").localeCompare(b.updated || "");
+      else cmp = a.name.localeCompare(b.name);
+      return viewerSortAsc ? cmp : -cmp;
+    });
+
+  function renderSlideCanvasAndNav(minHeight = 460) {
+    return (
+      <>
+        <div
+          style={{
+            position: "relative",
+            display: "flex",
+            justifyContent: "center",
+            alignItems: "center",
+            minHeight,
+            background: ui.canvasBg,
+            borderRadius: 8,
+            padding: 12,
+            border: `1px solid ${ui.border}`,
+            overflow: "hidden",
+          }}
+        >
+          <div ref={previewContainerRef} style={{ display: "flex", justifyContent: "center" }} />
+
+          {previewLoading && (
+            <div
+              data-testid="preview-loading-overlay"
+              style={{
+                position: "absolute",
+                inset: 0,
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: 10,
+                background: isDark ? "rgba(9, 13, 22, 0.74)" : "rgba(240, 244, 249, 0.78)",
+                backdropFilter: "blur(3px)",
+                zIndex: 20,
+              }}
+            >
+              <ActionPptxDeckLogo size={48} pulse />
+              <div
+                style={{
+                  fontSize: 12.5,
+                  fontWeight: 700,
+                  color: ui.textPrimary,
+                  background: ui.cardBg,
+                  border: `1px solid ${ui.border}`,
+                  padding: "5px 12px",
+                  borderRadius: 999,
+                }}
+              >
+                {previewLoadingLabel || "Rendering preview..."}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {totalSlides > 0 &&
+          (() => {
+            const navBtnStyle = (enabled: boolean, primary = false): React.CSSProperties => ({
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 5,
+              background: !enabled ? ui.inputBg : primary ? ui.accent : ui.cardBg,
+              color: !enabled ? ui.textMuted : primary ? ui.accentContrast : ui.textPrimary,
+              border: `1px solid ${enabled && primary ? ui.accent : ui.border}`,
+              borderRadius: 6,
+              padding: primary ? "6px 14px" : "6px 12px",
+              fontSize: 12.5,
+              fontWeight: 700,
+              whiteSpace: "nowrap",
+              cursor: enabled ? "pointer" : "not-allowed",
+              opacity: enabled ? 1 : 0.5,
+            });
+            return (
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  flexWrap: "wrap",
+                  gap: 8,
+                  marginTop: 10,
+                  padding: "7px 10px",
+                  background: ui.inputBg,
+                  border: `1px solid ${ui.border}`,
+                  borderRadius: 8,
+                }}
+              >
+                <button
+                  id="btn-slide-prev"
+                  type="button"
+                  disabled={currentSlide <= 0}
+                  onClick={() => goToSlide(currentSlide - 1)}
+                  style={navBtnStyle(currentSlide > 0)}
+                >
+                  <IconArrowLeft />
+                  <span>Back</span>
+                </button>
+
+                <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                  {Array.from({ length: totalSlides }, (_, idx) => {
+                    const active = idx === currentSlide;
+                    return (
+                      <button
+                        key={idx}
+                        id={`btn-slide-${idx + 1}`}
+                        type="button"
+                        onClick={() => goToSlide(idx)}
+                        style={{
+                          background: active ? ui.accent : ui.cardBg,
+                          color: active ? ui.accentContrast : ui.textSecondary,
+                          border: `1px solid ${active ? ui.accent : ui.border}`,
+                          borderRadius: 6,
+                          padding: "5px 10px",
+                          fontSize: 12,
+                          fontWeight: 700,
+                          whiteSpace: "nowrap",
+                          cursor: "pointer",
+                        }}
+                      >
+                        Slide {idx + 1}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <button
+                    id="btn-slide-next"
+                    type="button"
+                    disabled={currentSlide >= totalSlides - 1}
+                    onClick={() => goToSlide(currentSlide + 1)}
+                    style={navBtnStyle(currentSlide < totalSlides - 1, true)}
+                  >
+                    <span>Next</span>
+                    <IconArrowRight />
+                  </button>
+                  <button
+                    id="btn-slide-end"
+                    type="button"
+                    disabled={currentSlide >= totalSlides - 1}
+                    onClick={() => goToSlide(totalSlides - 1)}
+                    style={navBtnStyle(currentSlide < totalSlides - 1)}
+                  >
+                    <span>End</span>
+                    <IconSkipEnd />
+                  </button>
+                </div>
+              </div>
+            );
+          })()}
+      </>
+    );
+  }
+
   return (
     <div
       style={{
@@ -929,7 +1332,7 @@ export const App: React.FC<AppProps> = ({ core40SDK, extensionSDK }) => {
         background: ui.bg,
         color: ui.textPrimary,
         fontFamily: "Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
-        padding: "28px 32px",
+        padding: "16px 20px",
         transition: "background 0.2s ease, color 0.2s ease",
       }}
     >
@@ -948,26 +1351,50 @@ export const App: React.FC<AppProps> = ({ core40SDK, extensionSDK }) => {
             justifyContent: "space-between",
             alignItems: "center",
             flexWrap: "wrap",
-            gap: 14,
+            gap: 10,
             borderBottom: `1px solid ${ui.border}`,
-            paddingBottom: 18,
-            marginBottom: 22,
+            paddingBottom: 12,
+            marginBottom: 14,
           }}
         >
-          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-            <ActionPptxDeckLogo size={40} />
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <ActionPptxDeckLogo size={34} />
             <div>
-              <h1 style={{ margin: 0, fontSize: 22, fontWeight: 700, color: ui.textPrimary }}>
-                PowerPoint Report Builder
+              <h1 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: ui.textPrimary }}>
+                {isViewerRoute ? "PowerPoint Report Viewer" : "PowerPoint Report Builder"}
               </h1>
-              <p style={{ margin: "3px 0 0", fontSize: 13, color: ui.textMuted }}>
-                Preview your PowerPoint template with live Looker dashboard data or save it to your
-                shared library.
+              <p style={{ margin: "2px 0 0", fontSize: 12, color: ui.textMuted }}>
+                {isViewerRoute
+                  ? "Browse and inspect rendered PowerPoint reports and saved templates."
+                  : "Preview your PowerPoint template with live Looker dashboard data or save it to your shared library."}
               </p>
             </div>
           </div>
 
-          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+            {(isViewerRoute || canOpenViewer) && (
+              <button
+                id={isViewerRoute ? "btn-switch-builder" : "btn-switch-viewer"}
+                type="button"
+                onClick={() => navigateTo(isViewerRoute ? "/" : "/viewer")}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  background: ui.cardBg,
+                  color: ui.accent,
+                  border: `1px solid ${ui.accent}`,
+                  borderRadius: 6,
+                  padding: "5px 10px",
+                  fontSize: 12,
+                  fontWeight: 700,
+                  cursor: "pointer",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {isViewerRoute ? "Switch to Builder" : "Switch to Viewer"}
+              </button>
+            )}
+
             <LookerThemePicker
               themes={lookerThemes}
               selectedThemeName={selectedThemeName}
@@ -983,12 +1410,12 @@ export const App: React.FC<AppProps> = ({ core40SDK, extensionSDK }) => {
               style={{
                 display: "inline-flex",
                 alignItems: "center",
-                gap: 6,
+                gap: 5,
                 background: ui.cardBg,
                 color: ui.textPrimary,
                 border: `1px solid ${ui.border}`,
-                borderRadius: 8,
-                padding: "7px 12px",
+                borderRadius: 6,
+                padding: "5px 10px",
                 fontSize: 12,
                 fontWeight: 600,
                 cursor: "pointer",
@@ -1005,13 +1432,13 @@ export const App: React.FC<AppProps> = ({ core40SDK, extensionSDK }) => {
                   style={{
                     display: "inline-flex",
                     alignItems: "center",
-                    gap: 5,
-                    fontSize: 12,
+                    gap: 4,
+                    fontSize: 11.5,
                     fontWeight: 600,
                     color: isDark ? "#34d399" : "#047857",
                     background: isDark ? "#064e3b" : "#d1fae5",
                     border: `1px solid ${isDark ? "#059669" : "#10b981"}`,
-                    padding: "6px 11px",
+                    padding: "4px 9px",
                     borderRadius: 999,
                     whiteSpace: "nowrap",
                   }}
@@ -1026,12 +1453,12 @@ export const App: React.FC<AppProps> = ({ core40SDK, extensionSDK }) => {
                   style={{
                     display: "inline-flex",
                     alignItems: "center",
-                    gap: 6,
+                    gap: 5,
                     background: ui.cardBg,
                     color: ui.textSecondary,
                     border: `1px solid ${ui.border}`,
-                    borderRadius: 8,
-                    padding: "7px 12px",
+                    borderRadius: 6,
+                    padding: "5px 10px",
                     fontSize: 12,
                     fontWeight: 600,
                     cursor: "pointer",
@@ -1046,28 +1473,421 @@ export const App: React.FC<AppProps> = ({ core40SDK, extensionSDK }) => {
           </div>
         </div>
 
+        {isViewerRoute ? (
+          !canOpenViewer ? (
+            <div
+              style={{
+                background: ui.cardBg,
+                border: `1px solid ${ui.border}`,
+                borderRadius: 10,
+                padding: 20,
+              }}
+            >
+              <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 6 }}>
+                Report Viewer Unavailable
+              </div>
+              <p style={{ margin: "0 0 12px", fontSize: 12.5, color: ui.textMuted }}>
+                {!serverViewerEnabled
+                  ? "The PowerPoint Report Viewer has been disabled by the server configuration."
+                  : "Configure an Output GCS Bucket URI in Settings (/config) to enable the Report Viewer."}
+              </p>
+              <button
+                type="button"
+                onClick={() => navigateTo("/")}
+                style={{
+                  background: ui.accent,
+                  color: ui.accentContrast,
+                  border: "none",
+                  borderRadius: 6,
+                  padding: "6px 12px",
+                  fontSize: 12,
+                  fontWeight: 700,
+                  cursor: "pointer",
+                }}
+              >
+                Back to Builder
+              </button>
+            </div>
+          ) : (
+            <div style={{ display: "grid", gap: 12 }}>
+              <div
+                style={{
+                  background: ui.cardBg,
+                  border: `1px solid ${ui.border}`,
+                  borderRadius: 10,
+                  padding: "10px 12px",
+                }}
+              >
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    marginBottom: 10,
+                    flexWrap: "wrap",
+                  }}
+                >
+                  <div
+                    role="tablist"
+                    aria-label="Viewer source mode"
+                    style={{
+                      display: "inline-flex",
+                      background: ui.inputBg,
+                      border: `1px solid ${ui.border}`,
+                      borderRadius: 6,
+                      padding: 2,
+                      gap: 2,
+                      flexShrink: 0,
+                    }}
+                  >
+                    {(["outputs", "templates"] as ViewerMode[]).map((mode) => {
+                      const active = viewerMode === mode;
+                      return (
+                        <button
+                          key={mode}
+                          id={`btn-viewer-mode-${mode}`}
+                          type="button"
+                          role="tab"
+                          aria-selected={active}
+                          onClick={() => handleSwitchViewerMode(mode)}
+                          style={{
+                            border: "none",
+                            borderRadius: 4,
+                            padding: "5px 10px",
+                            fontSize: 12,
+                            fontWeight: 700,
+                            whiteSpace: "nowrap",
+                            cursor: "pointer",
+                            background: active ? ui.accent : "transparent",
+                            color: active ? ui.accentContrast : ui.textSecondary,
+                          }}
+                        >
+                          {VIEWER_MODE_META[mode].tabLabel}
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  <div
+                    style={{
+                      flex: "1 1 200px",
+                      minWidth: 160,
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 6,
+                      background: ui.inputBg,
+                      border: `1px solid ${ui.border}`,
+                      borderRadius: 6,
+                      padding: "5px 10px",
+                    }}
+                  >
+                    <IconSearch />
+                    <input
+                      id="viewer-search-input"
+                      type="text"
+                      value={viewerSearch}
+                      onChange={(e) => setViewerSearch(e.target.value)}
+                      placeholder={VIEWER_MODE_META[viewerMode].searchPlaceholder}
+                      style={{
+                        flex: 1,
+                        border: "none",
+                        outline: "none",
+                        background: "transparent",
+                        color: ui.textPrimary,
+                        fontSize: 12.5,
+                      }}
+                    />
+                  </div>
+
+                  <button
+                    id="btn-viewer-refresh"
+                    type="button"
+                    disabled={viewerLoadingList}
+                    onClick={() => void loadViewerFiles()}
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 5,
+                      background: ui.inputBg,
+                      color: ui.textPrimary,
+                      border: `1px solid ${ui.border}`,
+                      borderRadius: 6,
+                      padding: "6px 12px",
+                      fontSize: 12,
+                      fontWeight: 600,
+                      whiteSpace: "nowrap",
+                      flexShrink: 0,
+                      cursor: viewerLoadingList ? "wait" : "pointer",
+                    }}
+                  >
+                    <IconRefresh />
+                    <span>{viewerLoadingList ? "Refreshing..." : "Refresh"}</span>
+                  </button>
+                </div>
+
+                {actionError && (
+                  <div
+                    style={{
+                      marginBottom: 10,
+                      background: isDark ? "#450a0a" : "#fef2f2",
+                      border: "1px solid #dc2626",
+                      color: isDark ? "#fecaca" : "#991b1b",
+                      borderRadius: 6,
+                      padding: "7px 10px",
+                      fontSize: 12,
+                    }}
+                  >
+                    {actionError}
+                  </div>
+                )}
+
+                <div
+                  style={{
+                    border: `1px solid ${ui.border}`,
+                    borderRadius: 8,
+                    overflow: "auto",
+                    maxHeight: 340,
+                  }}
+                >
+                  <table
+                    id="viewer-reports-table"
+                    style={{
+                      width: "100%",
+                      borderCollapse: "collapse",
+                      fontSize: 12,
+                    }}
+                  >
+                    <thead>
+                      <tr
+                        style={{
+                          background: ui.inputBg,
+                          borderBottom: `1px solid ${ui.border}`,
+                          textAlign: "left",
+                          position: "sticky",
+                          top: 0,
+                          zIndex: 1,
+                        }}
+                      >
+                        {(
+                          [
+                            ["name", "Name"],
+                            ["size", "Size"],
+                            ["updated", VIEWER_MODE_META[viewerMode].dateColumn],
+                          ] as const
+                        ).map(([key, label]) => (
+                          <th key={key} style={{ padding: "7px 10px", fontWeight: 700 }}>
+                            <button
+                              type="button"
+                              onClick={() => toggleViewerSort(key)}
+                              style={{
+                                background: "none",
+                                border: "none",
+                                padding: 0,
+                                color: ui.textPrimary,
+                                font: "inherit",
+                                fontWeight: 700,
+                                cursor: "pointer",
+                              }}
+                            >
+                              {label}
+                              {viewerSortKey === key ? (viewerSortAsc ? " ▲" : " ▼") : ""}
+                            </button>
+                          </th>
+                        ))}
+                        <th style={{ padding: "7px 10px", textAlign: "right", fontWeight: 700 }}>
+                          Actions
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filteredViewerFiles.length === 0 ? (
+                        <tr>
+                          <td
+                            colSpan={4}
+                            style={{
+                              padding: "16px 10px",
+                              textAlign: "center",
+                              color: ui.textMuted,
+                            }}
+                          >
+                            {viewerLoadingList
+                              ? "Loading files..."
+                              : viewerQuery
+                                ? `No presentations matching "${viewerSearch}".`
+                                : VIEWER_MODE_META[viewerMode].emptyText}
+                          </td>
+                        </tr>
+                      ) : (
+                        filteredViewerFiles.map((f) => {
+                          const isSelected = viewerFileName === f.name;
+                          const isLoadingRow = viewerLoadingFile === f.name;
+                          return (
+                            <tr
+                              key={f.name}
+                              style={{
+                                borderBottom: `1px solid ${ui.border}`,
+                                background: isSelected
+                                  ? isDark
+                                    ? "rgba(59, 130, 246, 0.14)"
+                                    : "rgba(37, 99, 235, 0.08)"
+                                  : "transparent",
+                              }}
+                            >
+                              <td style={{ padding: "6px 10px", fontWeight: isSelected ? 700 : 500 }}>
+                                {f.name}
+                              </td>
+                              <td style={{ padding: "6px 10px", color: ui.textSecondary, whiteSpace: "nowrap" }}>
+                                {formatBytes(f.size)}
+                              </td>
+                              <td style={{ padding: "6px 10px", color: ui.textSecondary, whiteSpace: "nowrap" }}>
+                                {f.updated ? new Date(f.updated).toLocaleString() : "—"}
+                              </td>
+                              <td style={{ padding: "6px 10px", textAlign: "right", whiteSpace: "nowrap" }}>
+                                <div style={{ display: "inline-flex", gap: 6 }}>
+                                  <button
+                                    type="button"
+                                    disabled={Boolean(viewerLoadingFile)}
+                                    onClick={() => void handleLoadViewerReport(f.name)}
+                                    style={{
+                                      background: ui.accent,
+                                      color: ui.accentContrast,
+                                      border: "none",
+                                      borderRadius: 5,
+                                      padding: "4px 9px",
+                                      fontSize: 11.5,
+                                      fontWeight: 700,
+                                      cursor: viewerLoadingFile ? "wait" : "pointer",
+                                    }}
+                                  >
+                                    {isLoadingRow ? "Loading..." : "View"}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={Boolean(viewerLoadingFile)}
+                                    onClick={() => void handleDownloadViewerReport(f.name)}
+                                    style={{
+                                      background: ui.inputBg,
+                                      color: ui.textPrimary,
+                                      border: `1px solid ${ui.border}`,
+                                      borderRadius: 5,
+                                      padding: "4px 9px",
+                                      fontSize: 11.5,
+                                      fontWeight: 600,
+                                      cursor: viewerLoadingFile ? "wait" : "pointer",
+                                    }}
+                                  >
+                                    Download
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {(viewerPptxBase64 || previewLoading) && (
+                <div
+                  style={{
+                    background: ui.cardBg,
+                    border: `1px solid ${ui.border}`,
+                    borderRadius: 10,
+                    padding: "10px 12px",
+                  }}
+                >
+                  <div
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                      flexWrap: "wrap",
+                      gap: 8,
+                      marginBottom: 10,
+                    }}
+                  >
+                    <div style={{ fontSize: 13, fontWeight: 700, color: ui.textPrimary }}>
+                      {viewerFileName || "Presentation Preview"}
+                    </div>
+                    <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                      {viewerPptxBase64 && (
+                        <button
+                          id="btn-viewer-download-active"
+                          type="button"
+                          onClick={() => downloadPptxBase64(viewerPptxBase64, viewerFileName || "report.pptx")}
+                          style={{
+                            display: "inline-flex",
+                            alignItems: "center",
+                            gap: 5,
+                            background: ui.inputBg,
+                            color: ui.accent,
+                            border: `1px solid ${ui.accent}`,
+                            borderRadius: 6,
+                            padding: "5px 10px",
+                            fontSize: 12,
+                            fontWeight: 600,
+                            cursor: "pointer",
+                          }}
+                        >
+                          <IconDownload />
+                          <span>Download .pptx</span>
+                        </button>
+                      )}
+                      <button
+                        id="btn-viewer-close"
+                        type="button"
+                        onClick={handleEndPreview}
+                        style={{
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: 5,
+                          background: isDark ? "#1e293b" : "#fee2e2",
+                          color: isDark ? "#fda4af" : "#b91c1c",
+                          border: `1px solid ${isDark ? "#881337" : "#fca5a5"}`,
+                          borderRadius: 6,
+                          padding: "5px 10px",
+                          fontSize: 12,
+                          fontWeight: 700,
+                          cursor: "pointer",
+                        }}
+                      >
+                        <IconClose />
+                        <span>Close</span>
+                      </button>
+                    </div>
+                  </div>
+                  {renderSlideCanvasAndNav(440)}
+                </div>
+              )}
+            </div>
+          )
+        ) : (
+          <>
+
         {/* Step 1 & Step 2 Cards */}
         <div
           style={{
             display: "grid",
             gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)",
-            gap: 16,
-            marginBottom: 16,
+            gap: 10,
+            marginBottom: 10,
           }}
         >
           <div
             style={{
               background: ui.cardBg,
               border: `1px solid ${ui.border}`,
-              borderRadius: 12,
-              padding: 18,
+              borderRadius: 10,
+              padding: 12,
               minWidth: 0,
             }}
           >
-            <div style={{ fontSize: 11, fontWeight: 700, color: ui.accent, marginBottom: 4 }}>
+            <div style={{ fontSize: 10.5, fontWeight: 700, color: ui.accent, marginBottom: 2 }}>
               STEP 1
             </div>
-            <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 10 }}>
+            <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 8 }}>
               Choose a Dashboard
             </div>
             <DashboardPicker
@@ -1079,16 +1899,16 @@ export const App: React.FC<AppProps> = ({ core40SDK, extensionSDK }) => {
               isDark={isDark}
             />
             {tiles.length > 0 && (
-              <div style={{ marginTop: 10, display: "flex", flexWrap: "wrap", gap: 6 }}>
+              <div style={{ marginTop: 8, display: "flex", flexWrap: "wrap", gap: 5 }}>
                 {tiles.slice(0, 9).map((t) => (
                   <span
                     key={t.slug}
                     style={{
-                      fontSize: 11,
+                      fontSize: 10.5,
                       background: ui.inputBg,
                       color: ui.textSecondary,
                       border: `1px solid ${ui.border}`,
-                      padding: "3px 9px",
+                      padding: "2px 7px",
                       borderRadius: 999,
                       fontWeight: 500,
                     }}
@@ -1099,11 +1919,11 @@ export const App: React.FC<AppProps> = ({ core40SDK, extensionSDK }) => {
                 {tiles.length > 9 && (
                   <span
                     style={{
-                      fontSize: 11,
+                      fontSize: 10.5,
                       background: ui.inputBg,
                       color: ui.accent,
                       border: `1px solid ${ui.border}`,
-                      padding: "3px 9px",
+                      padding: "2px 7px",
                       borderRadius: 999,
                       fontWeight: 700,
                     }}
@@ -1119,15 +1939,15 @@ export const App: React.FC<AppProps> = ({ core40SDK, extensionSDK }) => {
             style={{
               background: ui.cardBg,
               border: `1px solid ${ui.border}`,
-              borderRadius: 12,
-              padding: 18,
+              borderRadius: 10,
+              padding: 12,
               minWidth: 0,
             }}
           >
-            <div style={{ fontSize: 11, fontWeight: 700, color: ui.accent, marginBottom: 4 }}>
+            <div style={{ fontSize: 10.5, fontWeight: 700, color: ui.accent, marginBottom: 2 }}>
               STEP 2
             </div>
-            <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 10 }}>
+            <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 8 }}>
               Select PowerPoint Template (.pptx)
             </div>
             <input
@@ -1137,17 +1957,17 @@ export const App: React.FC<AppProps> = ({ core40SDK, extensionSDK }) => {
               onChange={(e) => void handleFileSelect(e)}
               style={{
                 width: "100%",
-                padding: "8px 10px",
-                borderRadius: 8,
+                padding: "6px 8px",
+                borderRadius: 6,
                 background: ui.inputBg,
                 color: ui.textSecondary,
                 border: `1px solid ${ui.border}`,
-                fontSize: 13,
+                fontSize: 12.5,
                 boxSizing: "border-box",
               }}
             />
             {fileName && (
-              <div style={{ marginTop: 10, fontSize: 12, color: ui.textMuted }}>
+              <div style={{ marginTop: 8, fontSize: 11.5, color: ui.textMuted }}>
                 Selected template:{" "}
                 <strong style={{ color: ui.textPrimary }}>{fileName}</strong>
               </div>
@@ -1160,9 +1980,9 @@ export const App: React.FC<AppProps> = ({ core40SDK, extensionSDK }) => {
           style={{
             background: ui.cardBg,
             border: `1px solid ${ui.border}`,
-            borderRadius: 12,
-            padding: "14px 18px",
-            marginBottom: 20,
+            borderRadius: 10,
+            padding: "10px 12px",
+            marginBottom: 14,
           }}
         >
           {/* Unified Top Action Bar */}
@@ -1170,13 +1990,13 @@ export const App: React.FC<AppProps> = ({ core40SDK, extensionSDK }) => {
             style={{
               display: "flex",
               flexWrap: "wrap",
-              gap: 10,
+              gap: 8,
               alignItems: "center",
               justifyContent: "space-between",
             }}
           >
             {/* Left Action Cluster */}
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
               <button
                 id="btn-preview"
                 type="button"
@@ -1185,13 +2005,13 @@ export const App: React.FC<AppProps> = ({ core40SDK, extensionSDK }) => {
                 style={{
                   display: "inline-flex",
                   alignItems: "center",
-                  gap: 7,
+                  gap: 5,
                   background: ui.accent,
                   color: ui.accentContrast,
                   border: "none",
-                  borderRadius: 8,
-                  padding: "9px 16px",
-                  fontSize: 13,
+                  borderRadius: 6,
+                  padding: "6px 12px",
+                  fontSize: 12,
                   fontWeight: 700,
                   whiteSpace: "nowrap",
                   cursor:
@@ -1213,13 +2033,13 @@ export const App: React.FC<AppProps> = ({ core40SDK, extensionSDK }) => {
                 style={{
                   display: "inline-flex",
                   alignItems: "center",
-                  gap: 7,
+                  gap: 5,
                   background: ui.inputBg,
                   color: ui.textPrimary,
                   border: `1px solid ${ui.border}`,
-                  borderRadius: 8,
-                  padding: "9px 14px",
-                  fontSize: 13,
+                  borderRadius: 6,
+                  padding: "6px 11px",
+                  fontSize: 12,
                   fontWeight: 600,
                   whiteSpace: "nowrap",
                   cursor: pptxBase64 && !busyLabel ? "pointer" : "not-allowed",
@@ -1238,13 +2058,13 @@ export const App: React.FC<AppProps> = ({ core40SDK, extensionSDK }) => {
                   style={{
                     display: "inline-flex",
                     alignItems: "center",
-                    gap: 7,
+                    gap: 5,
                     background: ui.inputBg,
                     color: ui.accent,
                     border: `1px solid ${ui.accent}`,
-                    borderRadius: 8,
-                    padding: "9px 14px",
-                    fontSize: 13,
+                    borderRadius: 6,
+                    padding: "6px 11px",
+                    fontSize: 12,
                     fontWeight: 600,
                     whiteSpace: "nowrap",
                     cursor: "pointer",
@@ -1534,13 +2354,13 @@ export const App: React.FC<AppProps> = ({ core40SDK, extensionSDK }) => {
                 style={{
                   display: "inline-flex",
                   alignItems: "center",
-                  gap: 7,
+                  gap: 5,
                   background: "#059669",
                   color: "#ffffff",
                   border: "none",
-                  borderRadius: 8,
-                  padding: "9px 16px",
-                  fontSize: 13,
+                  borderRadius: 6,
+                  padding: "6px 12px",
+                  fontSize: 12,
                   fontWeight: 700,
                   whiteSpace: "nowrap",
                   cursor: canSaveTemplate ? "pointer" : "not-allowed",
@@ -1559,13 +2379,13 @@ export const App: React.FC<AppProps> = ({ core40SDK, extensionSDK }) => {
                   style={{
                     display: "inline-flex",
                     alignItems: "center",
-                    gap: 6,
+                    gap: 5,
                     background: isDark ? "#1e293b" : "#fee2e2",
                     color: isDark ? "#fda4af" : "#b91c1c",
                     border: `1px solid ${isDark ? "#881337" : "#fca5a5"}`,
-                    borderRadius: 8,
-                    padding: "9px 13px",
-                    fontSize: 13,
+                    borderRadius: 6,
+                    padding: "6px 10px",
+                    fontSize: 12,
                     fontWeight: 700,
                     whiteSpace: "nowrap",
                     cursor: "pointer",
@@ -1583,163 +2403,16 @@ export const App: React.FC<AppProps> = ({ core40SDK, extensionSDK }) => {
             <div
               style={{
                 borderTop: `1px solid ${ui.border}`,
-                marginTop: 14,
-                paddingTop: 16,
+                marginTop: 10,
+                paddingTop: 12,
               }}
             >
-              <div
-                style={{
-                  position: "relative",
-                  display: "flex",
-                  justifyContent: "center",
-                  alignItems: "center",
-                  minHeight: 484,
-                  background: ui.canvasBg,
-                  borderRadius: 10,
-                  padding: 16,
-                  border: `1px solid ${ui.border}`,
-                  overflow: "hidden",
-                }}
-              >
-                <div ref={previewContainerRef} style={{ display: "flex", justifyContent: "center" }} />
-
-                {previewLoading && (
-                  <div
-                    data-testid="preview-loading-overlay"
-                    style={{
-                      position: "absolute",
-                      inset: 0,
-                      display: "flex",
-                      flexDirection: "column",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      gap: 12,
-                      background: isDark
-                        ? "rgba(9, 13, 22, 0.74)"
-                        : "rgba(240, 244, 249, 0.78)",
-                      backdropFilter: "blur(3px)",
-                      zIndex: 20,
-                    }}
-                  >
-                    <ActionPptxDeckLogo size={56} pulse />
-                    <div
-                      style={{
-                        fontSize: 13,
-                        fontWeight: 700,
-                        color: ui.textPrimary,
-                        background: ui.cardBg,
-                        border: `1px solid ${ui.border}`,
-                        padding: "6px 14px",
-                        borderRadius: 999,
-                      }}
-                    >
-                      {previewLoadingLabel || "Rendering preview..."}
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              {totalSlides > 0 &&
-                (() => {
-                  const navBtnStyle = (
-                    enabled: boolean,
-                    primary = false
-                  ): React.CSSProperties => ({
-                    display: "inline-flex",
-                    alignItems: "center",
-                    gap: 6,
-                    background: !enabled ? ui.inputBg : primary ? ui.accent : ui.cardBg,
-                    color: !enabled ? ui.textMuted : primary ? ui.accentContrast : ui.textPrimary,
-                    border: `1px solid ${enabled && primary ? ui.accent : ui.border}`,
-                    borderRadius: 8,
-                    padding: primary ? "9px 20px" : "9px 16px",
-                    fontSize: 13.5,
-                    fontWeight: 700,
-                    whiteSpace: "nowrap",
-                    cursor: enabled ? "pointer" : "not-allowed",
-                    opacity: enabled ? 1 : 0.5,
-                  });
-                  return (
-                    <div
-                      style={{
-                        display: "flex",
-                        justifyContent: "space-between",
-                        alignItems: "center",
-                        flexWrap: "wrap",
-                        gap: 10,
-                        marginTop: 14,
-                        padding: "10px 14px",
-                        background: ui.inputBg,
-                        border: `1px solid ${ui.border}`,
-                        borderRadius: 10,
-                      }}
-                    >
-                      <button
-                        id="btn-slide-prev"
-                        type="button"
-                        disabled={currentSlide <= 0}
-                        onClick={() => goToSlide(currentSlide - 1)}
-                        style={navBtnStyle(currentSlide > 0)}
-                      >
-                        <IconArrowLeft />
-                        <span>Back</span>
-                      </button>
-
-                      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                        {Array.from({ length: totalSlides }, (_, idx) => {
-                          const active = idx === currentSlide;
-                          return (
-                            <button
-                              key={idx}
-                              id={`btn-slide-${idx + 1}`}
-                              type="button"
-                              onClick={() => goToSlide(idx)}
-                              style={{
-                                background: active ? ui.accent : ui.cardBg,
-                                color: active ? ui.accentContrast : ui.textSecondary,
-                                border: `1px solid ${active ? ui.accent : ui.border}`,
-                                borderRadius: 8,
-                                padding: "7px 13px",
-                                fontSize: 13,
-                                fontWeight: 700,
-                                whiteSpace: "nowrap",
-                                cursor: "pointer",
-                              }}
-                            >
-                              Slide {idx + 1}
-                            </button>
-                          );
-                        })}
-                      </div>
-
-                      <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                        <button
-                          id="btn-slide-next"
-                          type="button"
-                          disabled={currentSlide >= totalSlides - 1}
-                          onClick={() => goToSlide(currentSlide + 1)}
-                          style={navBtnStyle(currentSlide < totalSlides - 1, true)}
-                        >
-                          <span>Next</span>
-                          <IconArrowRight />
-                        </button>
-                        <button
-                          id="btn-slide-end"
-                          type="button"
-                          disabled={currentSlide >= totalSlides - 1}
-                          onClick={() => goToSlide(totalSlides - 1)}
-                          style={navBtnStyle(currentSlide < totalSlides - 1)}
-                        >
-                          <span>End</span>
-                          <IconSkipEnd />
-                        </button>
-                      </div>
-                    </div>
-                  );
-                })()}
+              {renderSlideCanvasAndNav(440)}
             </div>
           )}
         </div>
+          </>
+        )}
       </div>
     </div>
   );

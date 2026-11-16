@@ -37,6 +37,7 @@ class Settings:
     google_oauth_client_secret: str = ""
     cipher_master: str = ""
     encrypt_payload: bool = False
+    disable_report_viewer: bool = False
 
 
 def _split_csv_env(name: str) -> frozenset[str]:
@@ -67,6 +68,7 @@ def load_settings() -> Settings:
         google_oauth_client_secret=client_secret,
         cipher_master=cipher_master,
         encrypt_payload=os.environ.get("ENCRYPT_PAYLOAD", "").lower() == "true",
+        disable_report_viewer=os.environ.get("DISABLE_REPORT_VIEWER", "").lower() == "true",
     )
 
 

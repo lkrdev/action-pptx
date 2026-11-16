@@ -32,17 +32,16 @@ def _resolve_blob(
     return bucket_name, blob_path, blob
 
 
-def list_pptx_templates(
+def _iter_pptx_blobs(
     gcs_uri: str,
     allowed_buckets: frozenset[str],
     oauth_token: str | None = None,
-) -> list[str]:
-    """List relative *.pptx object names under gcs_uri."""
+) -> list[tuple[str, object]]:
     bucket_name, prefix = parse_and_validate_gcs_uri(gcs_uri, allowed_buckets)
     search_prefix = f"{prefix}/" if prefix else ""
     blobs = _get_storage_client(oauth_token).list_blobs(bucket_name, prefix=search_prefix)
 
-    templates: list[str] = []
+    matched: list[tuple[str, object]] = []
     for blob in blobs:
         name = str(blob.name)
         if not name.lower().endswith(".pptx"):
@@ -51,8 +50,35 @@ def list_pptx_templates(
             name[len(search_prefix) :] if search_prefix and name.startswith(search_prefix) else name
         )
         if rel and not rel.endswith("/"):
-            templates.append(rel)
-    return sorted(templates)
+            matched.append((rel, blob))
+    return matched
+
+
+def list_pptx_templates(
+    gcs_uri: str,
+    allowed_buckets: frozenset[str],
+    oauth_token: str | None = None,
+) -> list[str]:
+    """List relative *.pptx object names under gcs_uri."""
+    return sorted(rel for rel, _ in _iter_pptx_blobs(gcs_uri, allowed_buckets, oauth_token))
+
+
+def list_pptx_outputs(
+    gcs_uri: str,
+    allowed_buckets: frozenset[str],
+    oauth_token: str | None = None,
+) -> list[dict[str, object]]:
+    """List relative *.pptx objects with size/updated metadata under gcs_uri, newest first."""
+    items = [
+        {
+            "name": rel,
+            "size": int(getattr(blob, "size", 0) or 0),
+            "updated": u.isoformat() if (u := getattr(blob, "updated", None)) else "",
+        }
+        for rel, blob in _iter_pptx_blobs(gcs_uri, allowed_buckets, oauth_token)
+    ]
+    items.sort(key=lambda item: (str(item["updated"]), str(item["name"])), reverse=True)
+    return items
 
 
 def download_template_bytes(
