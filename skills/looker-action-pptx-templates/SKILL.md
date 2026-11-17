@@ -134,7 +134,9 @@ Build or retrofit native, editable `.pptx` templates with `action-pptx` Selectio
       if runs:
           runs[0].text = new_text
           for extra in runs[1:]:
-              para._p.remove(extra._r)
+              parent = extra._r.getparent()
+              if parent is not None:
+                  parent.remove(extra._r)
       else:
           para.text = new_text
   ```
