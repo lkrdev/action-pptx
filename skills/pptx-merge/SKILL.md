@@ -9,6 +9,8 @@ description: >
 
 `pptx-merge` populates native Microsoft PowerPoint (`.pptx`) templates from Looker's `unformatted` `csv_zip` exports without external mapping files. All bindings live inside standard PowerPoint properties.
 
+> For end-to-end `.pptx` template creation from master slides (Mode 1) or surgical retrofitting of existing untemplated decks (Mode 2) against existing LookML, use the master skill [`looker-action-pptx-templates`](../looker-action-pptx-templates/SKILL.md).
+
 ## 1. In-PPTX Binding Grammar
 
 ### Tile Slug Normalization
@@ -61,4 +63,7 @@ uv run pptx-merge validate template.pptx --schema dashboard_tiles.json
 
 # 3. Merge a Looker csv_zip export into a .pptx template
 uv run pptx-merge merge template.pptx --csv-zip export.zip -o output.pptx --title "Q4 Report"
+
+# Run from any external workspace without cloning this repository:
+uvx --from git+https://github.com/lkrdev/action-pptx pptx-merge inspect template.pptx
 ```
