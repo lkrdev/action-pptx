@@ -4,6 +4,7 @@ export interface ExtensionConfigData {
   cloudRunUrl: string;
   templatesGcsUri: string;
   outputGcsUri?: string;
+  actionIntegrationId?: string;
   templatesUserAttributeName?: string;
   useOAuth: boolean;
   oauthClientId?: string;
@@ -140,6 +141,7 @@ export const ConfigPage: React.FC<ConfigPageProps> = ({
     cloudRunUrl: initialConfig.cloudRunUrl || "",
     templatesGcsUri: initialConfig.templatesGcsUri || "",
     outputGcsUri: initialConfig.outputGcsUri || "",
+    actionIntegrationId: initialConfig.actionIntegrationId || "",
     templatesUserAttributeName: initialConfig.templatesUserAttributeName || "",
     useOAuth: Boolean(initialConfig.useOAuth),
     oauthClientId: initialConfig.oauthClientId || "",
@@ -190,7 +192,9 @@ export const ConfigPage: React.FC<ConfigPageProps> = ({
       const candidates = integrations.filter(
         (i) => i.id?.includes("action-pptx") || i.label?.toLowerCase().includes("action-pptx")
       );
+      const preferredId = (cfg.actionIntegrationId || "").trim();
       const match =
+        (preferredId && candidates.find((i) => String(i.id || "") === preferredId)) ||
         candidates.find((i) => i.enabled && !hubUrlFor(i).includes("trycloudflare")) ||
         candidates.find((i) => i.enabled) ||
         candidates[0];
@@ -231,6 +235,7 @@ export const ConfigPage: React.FC<ConfigPageProps> = ({
       }
 
       patch({
+        ...(match.id ? { actionIntegrationId: String(match.id) } : {}),
         ...(discoveredOrigin ? { cloudRunUrl: discoveredOrigin } : {}),
         ...(tmplParam?.value ? { templatesGcsUri: String(tmplParam.value) } : {}),
         ...(outParam?.value ? { outputGcsUri: String(outParam.value) } : {}),
@@ -241,10 +246,11 @@ export const ConfigPage: React.FC<ConfigPageProps> = ({
         oauthGcsPassthrough: discoveredPassthrough,
         oauthClientId: discoveredClientId,
       });
+      const actionDesc = match.id ? `Action "${match.id}"` : "registered Action Hub";
       setStatus(
         discoveredClientId
-          ? "Pre-filled Cloud Run URL, templates_gcs_uri, and shared Google OAuth Client ID from registered Action Hub."
-          : "Pre-filled Cloud Run URL and templates_gcs_uri from registered Action Hub."
+          ? `Pre-filled Cloud Run URL, templates_gcs_uri, and shared Google OAuth Client ID from ${actionDesc}.`
+          : `Pre-filled Cloud Run URL and templates_gcs_uri from ${actionDesc}.`
       );
     } catch (err: any) {
       setStatus(`Auto-discovery failed (Admin permissions required): ${err?.message || err}`);
@@ -275,6 +281,7 @@ export const ConfigPage: React.FC<ConfigPageProps> = ({
         cloudRunUrl: cfg.cloudRunUrl.trim().replace(/\/+$/, ""),
         templatesGcsUri: cfg.templatesGcsUri.trim(),
         outputGcsUri: cfg.outputGcsUri?.trim() || undefined,
+        actionIntegrationId: cfg.actionIntegrationId?.trim() || undefined,
         templatesUserAttributeName: cfg.templatesUserAttributeName?.trim() || undefined,
         useOAuth: cfg.useOAuth,
         oauthClientId: cfg.oauthClientId?.trim() || undefined,
@@ -486,6 +493,20 @@ export const ConfigPage: React.FC<ConfigPageProps> = ({
               value={cfg.outputGcsUri || ""}
               onChange={(e) => patch({ outputGcsUri: e.target.value })}
               placeholder="gs://my-output-bucket/output"
+              style={inputStyle}
+            />
+          </label>
+
+          <label>
+            <div style={{ fontSize: 12, fontWeight: 600, color: "#cbd5e1", marginBottom: 6 }}>
+              Action Integration ID (auto-discovered, e.g. <code>28::action-pptx</code>)
+            </div>
+            <input
+              id="input-action-integration-id"
+              type="text"
+              value={cfg.actionIntegrationId || ""}
+              onChange={(e) => patch({ actionIntegrationId: e.target.value })}
+              placeholder="28::action-pptx"
               style={inputStyle}
             />
           </label>

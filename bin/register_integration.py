@@ -249,6 +249,7 @@ def deploy_extension_to_new_project(
     service_url: str,
     templates_gcs_uri: str = "",
     output_gcs_uri: str = "",
+    action_integration_id: str = "",
     project_id: str,
     model_name: str,
     connection_name: str,
@@ -305,6 +306,7 @@ def deploy_extension_to_new_project(
             "service_url": normalize_service_base(service_url),
             "templates_gcs_uri": templates_gcs_uri,
             "output_gcs_uri": output_gcs_uri,
+            "action_integration_id": action_integration_id.strip(),
             "project_id": project_id,
             "oauth_client_id": (oauth_client_id or "").strip(),
             "oauth_gcs_passthrough": "true" if oauth_gcs_passthrough else "false",
@@ -377,7 +379,9 @@ def register_action_hub_and_extension(
             if "Could not find action-pptx integration" not in str(exc) or attempt == 2:
                 raise
             time.sleep(3)
+    action_integration_id = ""
     if isinstance(res, dict):
+        action_integration_id = str(res.get("integration_id") or "").strip()
         print(
             f"Integration Hub {res.get('hub_action', 'configured')} "
             f"(ID: {res.get('hub_id')}), enabled {res.get('integration_id')}!"
@@ -397,6 +401,7 @@ def register_action_hub_and_extension(
             service_url=url,
             templates_gcs_uri=templates_gcs_uri,
             output_gcs_uri=output_gcs_uri,
+            action_integration_id=action_integration_id,
             project_id=project_id,
             model_name=model_name,
             connection_name=connection_name,

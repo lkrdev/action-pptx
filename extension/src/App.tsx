@@ -431,6 +431,7 @@ export const App: React.FC<AppProps> = ({
       cloudRunUrl: ctx?.cloudRunUrl || "",
       templatesGcsUri: ctx?.templatesGcsUri || "",
       outputGcsUri: ctx?.outputGcsUri || "",
+      actionIntegrationId: ctx?.actionIntegrationId,
       templatesUserAttributeName: ctx?.templatesUserAttributeName,
       useOAuth: Boolean(ctx?.useOAuth),
       oauthClientId: ctx?.oauthClientId,

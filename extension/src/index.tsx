@@ -273,6 +273,7 @@ function createMockHarness(apiBase: string, secret: string, unconfigured: boolea
         cloudRunUrl: apiBase,
         templatesGcsUri: "gs://fifth-inkwell-452619-v2-action-pptx/templates",
         outputGcsUri: "gs://fifth-inkwell-452619-v2-action-pptx/output",
+        actionIntegrationId: "28::action-pptx",
         useOAuth: true,
         oauthClientId: "104928374651-shared-action-pptx.apps.googleusercontent.com",
         oauthGcsPassthrough: true,
