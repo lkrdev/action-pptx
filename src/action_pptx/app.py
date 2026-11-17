@@ -121,6 +121,24 @@ class TemplatePreviewRequest(BaseModel):
     theme_palette: dict[str, object] | None = None
 
 
+class OutputListRequest(BaseModel):
+    output_gcs_uri: str
+
+
+class OutputDownloadRequest(BaseModel):
+    output_gcs_uri: str
+    filename: str
+
+
+class TemplateListRequest(BaseModel):
+    templates_gcs_uri: str
+
+
+class TemplateDownloadRequest(BaseModel):
+    templates_gcs_uri: str
+    filename: str
+
+
 def _resolve_base_url(request: Request, settings: Settings) -> str:
     if os.environ.get("PUBLIC_BASE_URL"):
         return settings.public_base_url
@@ -273,6 +291,18 @@ def _require_extension_auth(
     raise HTTPException(status_code=403, detail="Invalid 'Authorization' header.")
 
 
+def _require_viewer_auth(
+    authorization: str | None,
+    settings: Settings,
+) -> str | None:
+    if settings.disable_report_viewer:
+        raise HTTPException(
+            status_code=403, detail="Report viewer is disabled by server configuration."
+        )
+    auth_mode, oauth_token = _require_extension_auth(authorization, settings)
+    return oauth_token if (auth_mode == "oauth" and settings.oauth_gcs_passthrough) else None
+
+
 def _decode_base64_payload(b64_str: str, label: str) -> bytes:
     cleaned = "".join(b64_str.split())
     if not cleaned:
@@ -307,6 +337,7 @@ def create_app() -> FastAPI:
             "uses_oauth": bool(settings.google_oauth_client_id),
             "oauth_client_id": settings.google_oauth_client_id,
             "oauth_gcs_passthrough": settings.oauth_gcs_passthrough,
+            "report_viewer_enabled": not settings.disable_report_viewer,
             "looker": {"success": True, "message": "Health check passed."},
         }
 
@@ -844,6 +875,71 @@ def create_app() -> FastAPI:
             "text_tags_replaced": merge_res.text_tags_replaced,
             "tile_row_counts": merge_res.tile_row_counts,
         }
+
+    def _list_viewer_bucket(gcs_uri: str, authorization: str | None) -> dict[str, object]:
+        settings = load_settings()
+        passthrough_token = _require_viewer_auth(authorization, settings)
+        try:
+            files = gcs.list_pptx_outputs(
+                gcs_uri,
+                settings.allowed_gcs_buckets,
+                oauth_token=passthrough_token,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"GCS list failed: {exc}") from exc
+        return {"files": files}
+
+    def _download_viewer_bucket(
+        gcs_uri: str, filename: str, authorization: str | None
+    ) -> dict[str, object]:
+        settings = load_settings()
+        passthrough_token = _require_viewer_auth(authorization, settings)
+        try:
+            clean_name = config.sanitize_relative_pptx_name(filename)
+            pptx_bytes = gcs.download_template_bytes(
+                gcs_uri,
+                clean_name,
+                settings.allowed_gcs_buckets,
+                oauth_token=passthrough_token,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"GCS download failed: {exc}") from exc
+        return {
+            "filename": clean_name,
+            "pptx_base64": base64.b64encode(pptx_bytes).decode("ascii"),
+        }
+
+    @app.post("/outputs/list")
+    async def list_outputs(
+        payload: OutputListRequest,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, object]:
+        return _list_viewer_bucket(payload.output_gcs_uri, authorization)
+
+    @app.post("/outputs/download")
+    async def download_output(
+        payload: OutputDownloadRequest,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, object]:
+        return _download_viewer_bucket(payload.output_gcs_uri, payload.filename, authorization)
+
+    @app.post("/templates/list")
+    async def list_templates_viewer(
+        payload: TemplateListRequest,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, object]:
+        return _list_viewer_bucket(payload.templates_gcs_uri, authorization)
+
+    @app.post("/templates/download")
+    async def download_template_viewer(
+        payload: TemplateDownloadRequest,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, object]:
+        return _download_viewer_bucket(payload.templates_gcs_uri, payload.filename, authorization)
 
     return app
 

@@ -247,6 +247,7 @@ def deploy_extension_to_new_project(
     *,
     service_url: str,
     templates_gcs_uri: str = "",
+    output_gcs_uri: str = "",
     project_id: str,
     model_name: str,
     connection_name: str,
@@ -302,6 +303,7 @@ def deploy_extension_to_new_project(
             "action": "configure_extension",
             "service_url": normalize_service_base(service_url),
             "templates_gcs_uri": templates_gcs_uri,
+            "output_gcs_uri": output_gcs_uri,
             "project_id": project_id,
             "oauth_client_id": (oauth_client_id or "").strip(),
             "oauth_gcs_passthrough": "true" if oauth_gcs_passthrough else "false",
@@ -385,6 +387,7 @@ def register_action_hub_and_extension(
         return deploy_extension_to_new_project(
             service_url=url,
             templates_gcs_uri=templates_gcs_uri,
+            output_gcs_uri=output_gcs_uri,
             project_id=project_id,
             model_name=model_name,
             connection_name=connection_name,

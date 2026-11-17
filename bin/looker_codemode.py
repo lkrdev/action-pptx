@@ -90,6 +90,7 @@ def _ensure_new_project(proj: str) -> None:
 def _configure_extension(
     base: str,
     templates_gcs_uri_val: str,
+    output_gcs_uri_val: str,
     project_id_val: str,
     oauth_client_id_val: str,
     oauth_passthrough: bool,
@@ -101,6 +102,8 @@ def _configure_extension(
         "useOAuth": bool(oauth_client_id_val),
         "oauthGcsPassthrough": oauth_passthrough if oauth_client_id_val else True,
     }
+    if output_gcs_uri_val:
+        context_data["outputGcsUri"] = output_gcs_uri_val
     if oauth_client_id_val:
         context_data["oauthClientId"] = oauth_client_id_val
 
@@ -127,6 +130,7 @@ def main() -> dict[str, object]:
 
     base = _normalize_base(service_url_val)
     templates_gcs_uri_val = _opt_str(_RAW_TEMPLATES_GCS_URI).strip()
+    output_gcs_uri_val = _opt_str(_RAW_OUTPUT_GCS_URI).strip()
     project_id_val = _opt_str(_RAW_PROJECT_ID, "action-pptx").strip() or "action-pptx"
 
     if action_val == "configure_extension":
@@ -139,6 +143,7 @@ def main() -> dict[str, object]:
         return _configure_extension(
             base,
             templates_gcs_uri_val,
+            output_gcs_uri_val,
             project_id_val,
             oauth_client_id_val,
             oauth_passthrough,
@@ -148,7 +153,6 @@ def main() -> dict[str, object]:
     if not api_key_token_val:
         raise ValueError("api_key_token variable is required.")
 
-    output_gcs_uri_val = _opt_str(_RAW_OUTPUT_GCS_URI)
     required_user_attribute_val = _opt_str(_RAW_REQUIRED_USER_ATTR).strip()
     extension_mode_val = _opt_str(_RAW_EXTENSION_MODE, "skip").strip().lower() or "skip"
 

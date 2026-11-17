@@ -789,9 +789,149 @@ def test_stage_lookml_project_dir_and_codemode_ast(tmp_path: Path) -> None:
     for key in (
         "cloudRunUrl",
         "templatesGcsUri",
+        "outputGcsUri",
         "useOAuth",
         "oauthClientId",
         "oauthGcsPassthrough",
         "update_data_app",
     ):
         assert key in codemode_src
+
+
+@pytest.mark.asyncio
+async def test_outputs_viewer_routes_and_disable_env(
+    action_env: str,
+    sample_template_bytes: bytes,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from datetime import UTC, datetime
+
+    class _OutBlob:
+        def __init__(self, name: str, size: int, updated: datetime) -> None:
+            self.name = name
+            self.size = size
+            self.updated = updated
+
+    class _OutClient:
+        def list_blobs(self, bucket_name: str, prefix: str = "") -> list[_OutBlob]:
+            return [
+                _OutBlob(
+                    f"{prefix}QBR_old.pptx",
+                    1200,
+                    datetime(2026, 11, 1, 10, 0, tzinfo=UTC),
+                ),
+                _OutBlob(f"{prefix}notes.txt", 50, datetime(2026, 11, 15, 10, 0, tzinfo=UTC)),
+                _OutBlob(
+                    f"{prefix}EBR_new.pptx",
+                    2400,
+                    datetime(2026, 11, 16, 12, 0, tzinfo=UTC),
+                ),
+            ]
+
+    recorded_oauth: list[str | None] = []
+
+    def _fake_storage_client(oauth_token: str | None = None) -> _OutClient:
+        recorded_oauth.append(oauth_token)
+        return _OutClient()
+
+    monkeypatch.setattr(gcs, "_get_storage_client", _fake_storage_client)
+    monkeypatch.setattr(
+        "action_pptx.config.verify_oauth_token_payload",
+        lambda token: {"email": "analyst@example.com", "email_verified": "true"},
+    )
+    monkeypatch.setattr(
+        gcs,
+        "download_template_bytes",
+        lambda uri, filename, allowed, oauth_token=None: (
+            recorded_oauth.append(oauth_token) or sample_template_bytes
+        ),
+    )
+
+    app = create_app()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r_health = await client.get("/health")
+        assert r_health.status_code == 200
+        assert r_health.json()["report_viewer_enabled"] is True
+
+        # List sorted newest first + OAuth passthrough
+        r_list = await client.post(
+            "/outputs/list",
+            headers={"Authorization": "Bearer viewer-oauth-tok"},
+            json={"output_gcs_uri": "gs://packages-bucket/out"},
+        )
+        assert r_list.status_code == 200
+        files = r_list.json()["files"]
+        assert [f["name"] for f in files] == ["EBR_new.pptx", "QBR_old.pptx"]
+        assert files[0]["size"] == 2400
+
+        # Disallowed bucket rejected
+        r_bad = await client.post(
+            "/outputs/list",
+            headers={"Authorization": f'Token token="{action_env}"'},
+            json={"output_gcs_uri": "gs://evil-bucket/out"},
+        )
+        assert r_bad.status_code == 400
+
+        # Download returns base64 pptx
+        r_dl = await client.post(
+            "/outputs/download",
+            headers={"Authorization": "Bearer viewer-oauth-tok"},
+            json={"output_gcs_uri": "gs://packages-bucket/out", "filename": "EBR_new.pptx"},
+        )
+        assert r_dl.status_code == 200
+        assert r_dl.json()["filename"] == "EBR_new.pptx"
+        assert base64.b64decode(r_dl.json()["pptx_base64"]) == sample_template_bytes
+        assert recorded_oauth == ["viewer-oauth-tok", "viewer-oauth-tok"]
+
+        # Path traversal rejected
+        r_trav = await client.post(
+            "/outputs/download",
+            headers={"Authorization": f'Token token="{action_env}"'},
+            json={"output_gcs_uri": "gs://packages-bucket/out", "filename": "../secret.pptx"},
+        )
+        assert r_trav.status_code == 400
+
+        # Template viewer routes share auth and disable env semantics
+        r_tpl_list = await client.post(
+            "/templates/list",
+            headers={"Authorization": "Bearer viewer-oauth-tok"},
+            json={"templates_gcs_uri": "gs://templates-bucket/team"},
+        )
+        assert r_tpl_list.status_code == 200
+        assert [f["name"] for f in r_tpl_list.json()["files"]] == ["EBR_new.pptx", "QBR_old.pptx"]
+
+        r_tpl_dl = await client.post(
+            "/templates/download",
+            headers={"Authorization": "Bearer viewer-oauth-tok"},
+            json={"templates_gcs_uri": "gs://templates-bucket/team", "filename": "EBR_new.pptx"},
+        )
+        assert r_tpl_dl.status_code == 200
+        assert base64.b64decode(r_tpl_dl.json()["pptx_base64"]) == sample_template_bytes
+
+        # Server env var disables viewer routes and /health flag
+        monkeypatch.setenv("DISABLE_REPORT_VIEWER", "true")
+        r_health_off = await client.get("/health")
+        assert r_health_off.status_code == 200
+        assert r_health_off.json()["report_viewer_enabled"] is False
+
+        r_list_off = await client.post(
+            "/outputs/list",
+            headers={"Authorization": f'Token token="{action_env}"'},
+            json={"output_gcs_uri": "gs://packages-bucket/out"},
+        )
+        assert r_list_off.status_code == 403
+
+        r_dl_off = await client.post(
+            "/outputs/download",
+            headers={"Authorization": f'Token token="{action_env}"'},
+            json={"output_gcs_uri": "gs://packages-bucket/out", "filename": "EBR_new.pptx"},
+        )
+        assert r_dl_off.status_code == 403
+
+        r_tpl_off = await client.post(
+            "/templates/list",
+            headers={"Authorization": f'Token token="{action_env}"'},
+            json={"templates_gcs_uri": "gs://templates-bucket/team"},
+        )
+        assert r_tpl_off.status_code == 403
