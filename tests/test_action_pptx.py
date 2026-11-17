@@ -796,12 +796,66 @@ def test_stage_lookml_project_dir_and_codemode_ast(tmp_path: Path) -> None:
         "cloudRunUrl",
         "templatesGcsUri",
         "outputGcsUri",
+        "actionIntegrationId",
         "useOAuth",
         "oauthClientId",
         "oauthGcsPassthrough",
         "update_data_app",
     ):
         assert key in codemode_src
+
+    captured_ctx: list[tuple[str, dict[str, dict[str, object]]]] = []
+    ns: dict[str, object] = {
+        "action": "configure_extension",
+        "service_url": "https://action-pptx.a.run.app/",
+        "templates_gcs_uri": "gs://b/templates",
+        "output_gcs_uri": "gs://b/output",
+        "action_integration_id": "28::action-pptx",
+        "project_id": "my-pptx-proj",
+        "update_data_app": lambda data_app_id, body: (
+            captured_ctx.append((data_app_id, body)) or body
+        ),
+    }
+    exec(compile(codemode_src, str(codemode_path), "exec"), ns)
+    app_id, body = captured_ctx[0]
+    assert app_id == "my-pptx-proj::action_pptx_template_manager"
+    assert body["context"]["actionIntegrationId"] == "28::action-pptx"
+
+
+def test_register_action_hub_passes_integration_id_to_update_data_app(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import subprocess
+
+    from bin import register_integration
+
+    calls: list[dict[str, str]] = []
+
+    def _fake_codemode(
+        *, variables: dict[str, str] | None = None, **_: object
+    ) -> dict[str, object]:
+        v = variables or {}
+        calls.append(v)
+        if v.get("action") == "setup_hub":
+            return {"hub_id": "42", "hub_action": "created", "integration_id": "42::action-pptx"}
+        return {"configured": True}
+
+    monkeypatch.setattr(register_integration, "_run_lkr_codemode", _fake_codemode)
+    monkeypatch.setattr(register_integration, "_load_bundle_js", lambda _p=None: "console.log(1);")
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: subprocess.CompletedProcess(a[0], 0))
+
+    ext_id = register_integration.register_action_hub_and_extension(
+        service_url="https://action-pptx.a.run.app",
+        api_key_token="nonce/digest",
+        templates_gcs_uri="gs://b/templates",
+        output_gcs_uri="gs://b/output",
+        extension_mode="new",
+        project_id="my-proj",
+        connection_name="bq_conn",
+    )
+    assert ext_id == "my-proj::action_pptx_template_manager"
+    cfg_call = next(c for c in calls if c.get("action") == "configure_extension")
+    assert cfg_call["action_integration_id"] == "42::action-pptx"
 
 
 @pytest.mark.asyncio

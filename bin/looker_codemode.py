@@ -61,6 +61,11 @@ try:
 except NameError:
     _RAW_OAUTH_PASSTHROUGH = ""
 
+try:
+    _RAW_ACTION_INTEGRATION_ID = action_integration_id
+except NameError:
+    _RAW_ACTION_INTEGRATION_ID = ""
+
 
 def _normalize_base(url: str) -> str:
     cleaned = url.strip().rstrip("/")
@@ -94,6 +99,7 @@ def _configure_extension(
     project_id_val: str,
     oauth_client_id_val: str,
     oauth_passthrough: bool,
+    action_integration_id_val: str = "",
 ) -> dict[str, object]:
     app_id = f"{project_id_val}::{EXTENSION_APP_ID}"
     context_data: dict[str, object] = {
@@ -104,6 +110,8 @@ def _configure_extension(
     }
     if output_gcs_uri_val:
         context_data["outputGcsUri"] = output_gcs_uri_val
+    if action_integration_id_val:
+        context_data["actionIntegrationId"] = action_integration_id_val
     if oauth_client_id_val:
         context_data["oauthClientId"] = oauth_client_id_val
 
@@ -140,6 +148,7 @@ def main() -> dict[str, object]:
             "true",
             "yes",
         )
+        action_integration_id_val = _opt_str(_RAW_ACTION_INTEGRATION_ID).strip()
         return _configure_extension(
             base,
             templates_gcs_uri_val,
@@ -147,6 +156,7 @@ def main() -> dict[str, object]:
             project_id_val,
             oauth_client_id_val,
             oauth_passthrough,
+            action_integration_id_val,
         )
 
     api_key_token_val = _opt_str(_RAW_API_KEY_TOKEN)
