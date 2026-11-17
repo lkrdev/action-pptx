@@ -306,7 +306,7 @@ def deploy_extension_to_new_project(
             "service_url": normalize_service_base(service_url),
             "templates_gcs_uri": templates_gcs_uri,
             "output_gcs_uri": output_gcs_uri,
-            "action_integration_id": action_integration_id.strip(),
+            "action_integration_id": (action_integration_id or "").strip(),
             "project_id": project_id,
             "oauth_client_id": (oauth_client_id or "").strip(),
             "oauth_gcs_passthrough": "true" if oauth_gcs_passthrough else "false",
