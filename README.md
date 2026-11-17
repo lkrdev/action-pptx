@@ -63,17 +63,7 @@ Deploy directly to Google Cloud Run using the deployment wizard:
 ./deploy.sh
 ```
 
-To view all CLI flags, options, and automated Looker registration parameters, run:
-
-```bash
-./deploy.sh --help
-```
-
-The wizard enables required Google Cloud APIs (`run`, `secretmanager`, `storage`, `cloudbuild`, `artifactregistry`), creates or reuses your GCS bucket and uploads sample templates from `assets/`, configures `action-hub-secret` in Secret Manager, deploys `action-pptx` to Cloud Run (Python 3.14), and optionally configures Looker end-to-end:
-- **Action Hub & Settings:** Registers/updates the Looker Integration Hub and configures `templates_gcs_uri` and `output_gcs_uri` on `action-pptx`.
-- **Extension Deployment (`--extension-mode new` or `existing`):**
-  - **New LookML Project (`new`):** Lists your Looker database connections and prompts you to choose one, creates a bare-Git LookML project, configures the LookML model + connection, deploys `bundle.js` + `manifest.lkml` to production, and pre-populates the path-scoped hidden `action_hub_secret` user attribute.
-  - **Existing LookML Project (`existing`):** Prints the ready-to-paste `application: action_pptx_template_manager { ... }` block with your deployed Cloud Run URL pre-filled in `external_api_urls`.
+See [deploy.md](deploy.md) for the full deployment walkthrough and redeploy flags, or the auto-generated [Deploy CLI Reference](deploy_cli_docs.md) (`./deploy.sh --help`) for all options.
 
 ---
 

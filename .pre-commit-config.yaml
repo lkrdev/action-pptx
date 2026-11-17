@@ -36,3 +36,9 @@ repos:
         entry: uv run --frozen pytest --cov=src --cov-report=term-missing
         language: system
         pass_filenames: false
+      - id: deploy-cli-docs
+        name: generate deploy_cli_docs.md
+        entry: bash -c 'GENERATE_DEPLOY_CLI_DOCS=deploy_cli_docs.md uv run --script bin/deploy.py && git add deploy_cli_docs.md'
+        language: system
+        files: ^(bin/deploy\.py|deploy_cli_docs\.md)$
+        pass_filenames: false
