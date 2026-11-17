@@ -208,6 +208,8 @@ application: action_pptx_template_manager {
       "https://oauth2.googleapis.com/token"
     ]
     local_storage: yes
+    new_window: yes
+    use_downloads: yes
     use_form_submit: yes
   }
 }

@@ -286,7 +286,16 @@ function createMockHarness(apiBase: string, secret: string, unconfigured: boolea
     },
     clientRouteChanged: (nextRoute: string) => {
       const target = nextRoute.startsWith("/") ? nextRoute : `/${nextRoute}`;
-      window.history.pushState(null, "", `${target}${window.location.search}`);
+      const qIdx = target.indexOf("?");
+      const pathPart = qIdx >= 0 ? target.slice(0, qIdx) : target;
+      const merged = new URLSearchParams(window.location.search);
+      merged.delete("filename");
+      merged.delete("mode");
+      if (qIdx >= 0) {
+        for (const [k, v] of new URLSearchParams(target.slice(qIdx + 1))) merged.set(k, v);
+      }
+      const qs = merged.toString();
+      window.history.replaceState(null, "", qs ? `${pathPart}?${qs}` : pathPart);
     },
     localStorageGetItem: async (k: string) => window.localStorage.getItem(k),
     localStorageSetItem: async (k: string, v: string) => window.localStorage.setItem(k, v),
@@ -446,7 +455,7 @@ async function mount() {
       if (routeListener === fn) routeListener = null;
     };
   };
-  let initialRoute = window.location.pathname;
+  let initialRoute = window.location.pathname + window.location.search;
   const extensionSDK = await connectExtensionHost({
     chattyTimeout: -1,
     setInitialRoute: (route: string) => {

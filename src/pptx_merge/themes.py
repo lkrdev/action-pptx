@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import cast
 
@@ -111,32 +112,43 @@ def _is_dark_hex(hex6: str) -> bool:
     return (0.299 * r + 0.587 * g + 0.114 * b) < 128.0
 
 
-def theme_from_looker_palette(name: str, palette: dict[str, object]) -> PptxTheme:
+def theme_from_looker_palette(name: str, palette: Mapping[str, object]) -> PptxTheme:
     """Build a PptxTheme dynamically from a Looker Theme + ColorCollection payload."""
-    bg = _hex6(palette.get("bg_color"), "090D16")
+    bg = _hex6(palette.get("bg_color") or palette.get("background_color"), "090D16")
     dark = _is_dark_hex(bg)
     defaults = BASE_TEMPLATE_THEME if dark else PPTX_THEMES["Embed_Demo_Light"]
     raw_series = palette.get("series_colors")
     parsed_series = [
         _hex6(c, "") for c in (raw_series if isinstance(raw_series, list) else []) if _hex6(c, "")
     ]
-    accent = _hex6(palette.get("accent"), defaults.series_palette[0])
+    accent = _hex6(
+        palette.get("accent") or palette.get("primary_button_color"), defaults.series_palette[0]
+    )
     fallback_series = [accent, *defaults.series_palette]
     merged_series = (parsed_series + fallback_series)[:5]
+    card_hex = palette.get("card_bg") or palette.get("tile_background_color")
+    text_hex = (
+        palette.get("text_color") or palette.get("tile_text_color") or palette.get("font_color")
+    )
     return PptxTheme(
         name=name or "Custom_Looker_Theme",
         brand=name or "Custom",
         mode="dark" if dark else "light",
         series_palette=cast(tuple[str, str, str, str, str], tuple(merged_series)),
         bg_color=bg,
-        card_bg=_hex6(palette.get("card_bg"), defaults.card_bg),
+        card_bg=_hex6(card_hex, defaults.card_bg),
         card_border=defaults.card_border,
-        row_alt_a=_hex6(palette.get("card_bg"), defaults.row_alt_a),
+        row_alt_a=_hex6(card_hex, defaults.row_alt_a),
         row_alt_b=defaults.row_alt_b,
         badge_bg=defaults.badge_bg,
-        text_primary=_hex6(palette.get("title_color"), defaults.text_primary),
-        text_secondary=_hex6(palette.get("text_color"), defaults.text_secondary),
-        text_muted=_hex6(palette.get("text_color"), defaults.text_muted),
+        text_primary=_hex6(
+            palette.get("title_color")
+            or palette.get("tile_title_color")
+            or palette.get("font_color"),
+            defaults.text_primary,
+        ),
+        text_secondary=_hex6(text_hex, defaults.text_secondary),
+        text_muted=_hex6(text_hex, defaults.text_muted),
         text_dim=defaults.text_dim,
     )
 

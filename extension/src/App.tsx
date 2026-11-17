@@ -25,11 +25,33 @@ interface AppProps {
   onHostRouteChange?: (listener: (route: string) => void) => () => void;
 }
 
-function normalizeRoute(raw?: string): string {
-  const cleaned = (raw || "").trim().replace(/\/+$/, "");
-  if (cleaned === "/config" || cleaned.endsWith("/config")) return "/config";
-  if (cleaned === "/viewer" || cleaned.endsWith("/viewer")) return "/viewer";
-  return "/";
+type ViewerMode = "outputs" | "templates";
+
+function parseExtensionRoute(raw?: string, fallbackSearch = "") {
+  const trimmed = (raw || "").trim();
+  const qIdx = trimmed.indexOf("?");
+  const cleaned = (qIdx >= 0 ? trimmed.slice(0, qIdx) : trimmed).replace(/\/+$/, "");
+  const params = new URLSearchParams(qIdx >= 0 ? trimmed.slice(qIdx + 1) : fallbackSearch);
+  const path: "/" | "/viewer" | "/config" =
+    cleaned === "config" || cleaned.endsWith("/config")
+      ? "/config"
+      : cleaned === "viewer" || cleaned.endsWith("/viewer")
+        ? "/viewer"
+        : "/";
+  const mode = params.get("mode");
+  return {
+    path,
+    filename: (params.get("filename") || "").trim(),
+    mode: mode === "templates" || mode === "outputs" ? (mode as ViewerMode) : undefined,
+  };
+}
+
+function buildViewerClientRoute(filename: string, mode: ViewerMode): string {
+  const params = new URLSearchParams();
+  if (mode === "templates") params.set("mode", "templates");
+  if (filename) params.set("filename", filename);
+  const qs = params.toString();
+  return qs ? `/viewer?${qs}` : "/viewer";
 }
 
 export const OAUTH_STORAGE_KEY = "action_pptx_oauth_session";
@@ -168,17 +190,6 @@ const IconLogOut = () => (
     <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4m7 14 5-5-5-5m5 5H9" />
   </Svg>
 );
-const IconSun = () => (
-  <Svg>
-    <circle cx="12" cy="12" r="4" />
-    <path d="M12 2v2m0 16v2M4.93 4.93l1.41 1.41m11.32 11.32 1.41 1.41M2 12h2m16 0h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41" />
-  </Svg>
-);
-const IconMoon = () => (
-  <Svg>
-    <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" />
-  </Svg>
-);
 const IconPlay = () => (
   <Svg>
     <polygon points="6 3 20 12 6 21 6 3" />
@@ -250,8 +261,6 @@ interface OutputReportItem {
   updated: string;
 }
 
-type ViewerMode = "outputs" | "templates";
-
 const VIEWER_MODE_META: Record<
   ViewerMode,
   {
@@ -294,13 +303,27 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function base64ToArrayBuffer(b64: string): ArrayBuffer {
+  const binary = window.atob(b64.replace(/\s+/g, ""));
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes.buffer;
+}
+
 function downloadPptxBase64(b64: string, outName: string): void {
+  const blob = new Blob([base64ToArrayBuffer(b64)], {
+    type: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  });
+  const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
-  link.href = `data:application/vnd.openxmlformats-officedocument.presentationml.presentation;base64,${b64}`;
+  link.href = url;
   link.download = outName;
   document.body.appendChild(link);
   link.click();
   document.body.removeChild(link);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 interface StoredOAuthSession {
@@ -387,28 +410,21 @@ function readFileAsBase64(file: File): Promise<string> {
   });
 }
 
-function base64ToArrayBuffer(b64: string): ArrayBuffer {
-  const binary = window.atob(b64.replace(/\s+/g, ""));
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return bytes.buffer;
-}
-
 export const App: React.FC<AppProps> = ({
   core40SDK,
   extensionSDK,
   initialRoute,
   onHostRouteChange,
 }) => {
-  const [route, setRoute] = useState<string>(() =>
-    normalizeRoute(
-      initialRoute ??
-        extensionSDK?.lookerHostData?.route ??
-        window.location.pathname
-    )
+  const initialParsed = useMemo(
+    () =>
+      parseExtensionRoute(
+        initialRoute ?? extensionSDK?.lookerHostData?.route ?? window.location.pathname,
+        window.location.search
+      ),
+    []
   );
+  const [route, setRoute] = useState<string>(initialParsed.path);
   const [config, setConfig] = useState<ExtensionConfigData>(() => {
     const ctx = extensionSDK?.getContextData?.() as ExtensionConfigData | undefined;
     return {
@@ -422,7 +438,8 @@ export const App: React.FC<AppProps> = ({
     };
   });
   const [serverViewerEnabled, setServerViewerEnabled] = useState<boolean>(false);
-  const [viewerMode, setViewerMode] = useState<ViewerMode>("outputs");
+  const [viewerMode, setViewerMode] = useState<ViewerMode>(initialParsed.mode || "outputs");
+  const [requestedViewerFile, setRequestedViewerFile] = useState<string>(initialParsed.filename);
   const [viewerSourceUri, setViewerSourceUri] = useState<string>("");
   const [viewerFiles, setViewerFiles] = useState<OutputReportItem[]>([]);
   const [viewerSearch, setViewerSearch] = useState<string>("");
@@ -462,12 +479,14 @@ export const App: React.FC<AppProps> = ({
   const [oauthSigningIn, setOauthSigningIn] = useState<boolean>(false);
 
   const previewContainerRef = useRef<HTMLDivElement | null>(null);
+  const slideStripRef = useRef<HTMLDivElement | null>(null);
   const previewerRef = useRef<any>(null);
   const desiredSlideRef = useRef<number>(0);
   const checkPopoverRef = useRef<HTMLDivElement | null>(null);
 
   // Monotonic sequence guard + SWR-style in-memory caches for instant/race-safe theme switching
   const previewSeqRef = useRef<number>(0);
+  const viewerLoadSeqRef = useRef<number>(0);
   const tileCsvCacheRef = useRef<Map<string, Record<string, string>>>(new Map());
   const previewPptxCacheRef = useRef<Map<string, string>>(new Map());
 
@@ -483,10 +502,22 @@ export const App: React.FC<AppProps> = ({
   const canOpenViewer = Boolean(config.outputGcsUri?.trim()) && serverViewerEnabled;
   const activePreviewBase64 = route === "/viewer" ? viewerPptxBase64 : mergedPptxBase64;
 
-  function navigateTo(nextRoute: string) {
-    const normalized = normalizeRoute(nextRoute);
+  function navigateTo(raw?: string, fallbackSearch = "") {
+    const parsed = parseExtensionRoute(raw, fallbackSearch);
     setActionError("");
-    setRoute(normalized);
+    setRoute(parsed.path);
+    if (parsed.mode) {
+      setViewerMode(parsed.mode);
+    }
+    if (parsed.path === "/viewer") {
+      setRequestedViewerFile(parsed.filename);
+      if (!parsed.filename) {
+        viewerLoadSeqRef.current += 1;
+        setViewerLoadingFile("");
+        setViewerPptxBase64("");
+        setViewerFileName("");
+      }
+    }
   }
 
   useEffect(() => {
@@ -515,13 +546,13 @@ export const App: React.FC<AppProps> = ({
     });
 
     const onPopState = () => {
-      setRoute(normalizeRoute(window.location.pathname));
+      navigateTo(window.location.pathname, window.location.search);
     };
     const onLookerRoute = (e: Event) => {
-      setRoute(normalizeRoute(String((e as CustomEvent).detail || "/")));
+      navigateTo(String((e as CustomEvent).detail || "/"));
     };
     const unsubscribeHostRoute = onHostRouteChange?.((nextRoute) => {
-      setRoute(normalizeRoute(nextRoute));
+      navigateTo(nextRoute);
     });
     window.addEventListener("popstate", onPopState);
     window.addEventListener("looker-route", onLookerRoute);
@@ -566,6 +597,34 @@ export const App: React.FC<AppProps> = ({
     oauthToken,
   ]);
 
+  useEffect(() => {
+    if (
+      route === "/viewer" &&
+      requestedViewerFile &&
+      canOpenViewer &&
+      (!config.useOAuth || oauthToken) &&
+      viewerFileName !== requestedViewerFile &&
+      viewerLoadingFile !== requestedViewerFile
+    ) {
+      void handleLoadViewerReport(requestedViewerFile, viewerMode);
+    }
+  }, [
+    route,
+    requestedViewerFile,
+    viewerMode,
+    canOpenViewer,
+    config.useOAuth,
+    oauthToken,
+    viewerFileName,
+    viewerLoadingFile,
+    handleLoadViewerReport,
+  ]);
+
+  useEffect(() => {
+    const activeBtn = slideStripRef.current?.querySelector<HTMLElement>('[aria-current="true"]');
+    activeBtn?.scrollIntoView({ block: "nearest", inline: "center", behavior: "smooth" });
+  }, [currentSlide, totalSlides]);
+
   // Sticky check/error popover: stays open until user clicks outside or presses Escape
   useDismissOnOutsideOrEscape(checkPopoverOpen, checkPopoverRef, () => setCheckPopoverOpen(false));
 
@@ -605,6 +664,9 @@ export const App: React.FC<AppProps> = ({
     desiredSlideRef.current = 0;
     setPreviewLoading(false);
     if (route === "/viewer") {
+      viewerLoadSeqRef.current += 1;
+      setViewerLoadingFile("");
+      setRequestedViewerFile("");
       setViewerPptxBase64("");
       setViewerFileName("");
     } else {
@@ -771,7 +833,8 @@ export const App: React.FC<AppProps> = ({
     name: string,
     mode: ViewerMode = viewerMode
   ): Promise<{ filename: string; pptxBase64: string }> {
-    const bucketUri = viewerSourceUri || (await resolveViewerBucketUri(mode));
+    const bucketUri =
+      (mode === viewerMode && viewerSourceUri) || (await resolveViewerBucketUri(mode));
     const meta = VIEWER_MODE_META[mode];
     if (!bucketUri) throw new Error(meta.missingUriText);
     const res = await callCloudRun(meta.downloadPath, {
@@ -784,18 +847,30 @@ export const App: React.FC<AppProps> = ({
     return { filename: String(res.filename || name), pptxBase64: String(res.pptx_base64) };
   }
 
-  async function handleLoadViewerReport(name: string) {
+  async function handleLoadViewerReport(name: string, mode: ViewerMode = viewerMode) {
+    const seq = ++viewerLoadSeqRef.current;
+    setRequestedViewerFile(name);
     setViewerLoadingFile(name);
+    setPreviewLoadingLabel("Loading presentation...");
+    setPreviewLoading(true);
     setActionError("");
     try {
-      const { filename, pptxBase64: b64 } = await fetchViewerReport(name);
+      const { filename, pptxBase64: b64 } = await fetchViewerReport(name, mode);
+      if (seq !== viewerLoadSeqRef.current) return;
       desiredSlideRef.current = 0;
+      setRequestedViewerFile(filename);
       setViewerFileName(filename);
       setViewerPptxBase64(b64);
     } catch (err: any) {
-      setActionError(`Could not load "${name}": ${err?.message || err}`);
+      if (seq === viewerLoadSeqRef.current) {
+        setRequestedViewerFile("");
+        setActionError(`Could not load "${name}": ${err?.message || err}`);
+      }
     } finally {
-      setViewerLoadingFile("");
+      if (seq === viewerLoadSeqRef.current) {
+        setPreviewLoading(false);
+        setViewerLoadingFile("");
+      }
     }
   }
 
@@ -954,26 +1029,6 @@ export const App: React.FC<AppProps> = ({
     }
   }
 
-  function handleToggleLightDark() {
-    const nextDark = !isDark;
-    setIsDark(nextDark);
-    let nextOpt: LookerThemeOption | undefined;
-    if (activeThemeOption.pairCounterpart) {
-      nextOpt = lookerThemes.find((t) => t.name === activeThemeOption.pairCounterpart);
-    } else if (activeThemeOption.name !== TEMPLATE_ORIGINAL_THEME) {
-      nextOpt = lookerThemes.find(
-        (t) => t.name === (nextDark ? "Embed_Demo_Dark" : "Embed_Demo_Light")
-      );
-    }
-    if (nextOpt) {
-      setSelectedThemeName(nextOpt.name);
-      if ((mergedPptxBase64 || previewLoading) && pptxBase64 && selectedDashboardId) {
-        desiredSlideRef.current = currentSlide;
-        void runPreview(nextOpt);
-      }
-    }
-  }
-
   function handleDownloadFilled() {
     if (!mergedPptxBase64) return;
     const suffix =
@@ -1031,14 +1086,18 @@ export const App: React.FC<AppProps> = ({
     config.cloudRunUrl && (!config.useOAuth || config.oauthClientId)
   );
   const effectiveRoute = !isConfigured ? "/config" : route;
+  const effectiveClientRoute =
+    effectiveRoute === "/viewer"
+      ? buildViewerClientRoute(viewerFileName || requestedViewerFile, viewerMode)
+      : effectiveRoute;
 
   useEffect(() => {
     try {
-      extensionSDK?.clientRouteChanged?.(effectiveRoute);
+      extensionSDK?.clientRouteChanged?.(effectiveClientRoute);
     } catch {
       // ignore host route sync errors in standalone mock harness
     }
-  }, [effectiveRoute]);
+  }, [effectiveClientRoute]);
 
   if (effectiveRoute === "/config") {
     return (
@@ -1249,7 +1308,7 @@ export const App: React.FC<AppProps> = ({
                   display: "flex",
                   justifyContent: "space-between",
                   alignItems: "center",
-                  flexWrap: "wrap",
+                  flexWrap: "nowrap",
                   gap: 8,
                   marginTop: 10,
                   padding: "7px 10px",
@@ -1263,13 +1322,25 @@ export const App: React.FC<AppProps> = ({
                   type="button"
                   disabled={currentSlide <= 0}
                   onClick={() => goToSlide(currentSlide - 1)}
-                  style={navBtnStyle(currentSlide > 0)}
+                  style={{ ...navBtnStyle(currentSlide > 0), flexShrink: 0 }}
                 >
                   <IconArrowLeft />
                   <span>Back</span>
                 </button>
 
-                <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                <div
+                  ref={slideStripRef}
+                  style={{
+                    flex: "1 1 0%",
+                    minWidth: 0,
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 4,
+                    overflowX: "auto",
+                    scrollbarWidth: "thin",
+                    padding: "2px 0",
+                  }}
+                >
                   {Array.from({ length: totalSlides }, (_, idx) => {
                     const active = idx === currentSlide;
                     return (
@@ -1277,26 +1348,36 @@ export const App: React.FC<AppProps> = ({
                         key={idx}
                         id={`btn-slide-${idx + 1}`}
                         type="button"
+                        aria-label={`Slide ${idx + 1} of ${totalSlides}`}
+                        aria-current={active ? "true" : undefined}
                         onClick={() => goToSlide(idx)}
                         style={{
+                          flexShrink: 0,
+                          marginLeft: idx === 0 ? "auto" : 0,
+                          marginRight: idx === totalSlides - 1 ? "auto" : 0,
+                          minWidth: 30,
+                          height: 28,
+                          display: "inline-flex",
+                          alignItems: "center",
+                          justifyContent: "center",
                           background: active ? ui.accent : ui.cardBg,
                           color: active ? ui.accentContrast : ui.textSecondary,
                           border: `1px solid ${active ? ui.accent : ui.border}`,
                           borderRadius: 6,
-                          padding: "5px 10px",
+                          padding: "0 8px",
                           fontSize: 12,
                           fontWeight: 700,
                           whiteSpace: "nowrap",
                           cursor: "pointer",
                         }}
                       >
-                        Slide {idx + 1}
+                        {idx + 1}
                       </button>
                     );
                   })}
                 </div>
 
-                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <div style={{ display: "flex", gap: 8, alignItems: "center", flexShrink: 0 }}>
                   <button
                     id="btn-slide-next"
                     type="button"
@@ -1344,22 +1425,21 @@ export const App: React.FC<AppProps> = ({
       `}</style>
 
       <div style={{ maxWidth: 960, margin: "0 auto" }}>
-        {/* Header with Real Looker Themes & Light/Dark Mode Switcher */}
+        {/* Header */}
         <div
           style={{
             display: "flex",
             justifyContent: "space-between",
             alignItems: "center",
-            flexWrap: "wrap",
-            gap: 10,
+            gap: 12,
             borderBottom: `1px solid ${ui.border}`,
             paddingBottom: 12,
             marginBottom: 14,
           }}
         >
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, flex: "1 1 0%", minWidth: 0 }}>
             <ActionPptxDeckLogo size={34} />
-            <div>
+            <div style={{ minWidth: 0 }}>
               <h1 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: ui.textPrimary }}>
                 {isViewerRoute ? "PowerPoint Report Viewer" : "PowerPoint Report Builder"}
               </h1>
@@ -1371,7 +1451,15 @@ export const App: React.FC<AppProps> = ({
             </div>
           </div>
 
-          <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+          <div
+            style={{
+              display: "flex",
+              gap: 6,
+              alignItems: "center",
+              flexShrink: 0,
+              marginLeft: "auto",
+            }}
+          >
             {(isViewerRoute || canOpenViewer) && (
               <button
                 id={isViewerRoute ? "btn-switch-builder" : "btn-switch-viewer"}
@@ -1395,36 +1483,15 @@ export const App: React.FC<AppProps> = ({
               </button>
             )}
 
-            <LookerThemePicker
-              themes={lookerThemes}
-              selectedThemeName={selectedThemeName}
-              onSelect={handleSelectLookerTheme}
-              ui={ui}
-              isDark={isDark}
-            />
-
-            <button
-              id="btn-theme-mode"
-              type="button"
-              onClick={handleToggleLightDark}
-              style={{
-                display: "inline-flex",
-                alignItems: "center",
-                gap: 5,
-                background: ui.cardBg,
-                color: ui.textPrimary,
-                border: `1px solid ${ui.border}`,
-                borderRadius: 6,
-                padding: "5px 10px",
-                fontSize: 12,
-                fontWeight: 600,
-                cursor: "pointer",
-                whiteSpace: "nowrap",
-              }}
-            >
-              {isDark ? <IconSun /> : <IconMoon />}
-              <span>{isDark ? "Light Mode" : "Dark Mode"}</span>
-            </button>
+            {!isViewerRoute && (
+              <LookerThemePicker
+                themes={lookerThemes}
+                selectedThemeName={selectedThemeName}
+                onSelect={handleSelectLookerTheme}
+                ui={ui}
+                isDark={isDark}
+              />
+            )}
 
             {config.useOAuth && oauthToken && (
               <>
@@ -1749,6 +1816,10 @@ export const App: React.FC<AppProps> = ({
                                     disabled={Boolean(viewerLoadingFile)}
                                     onClick={() => void handleLoadViewerReport(f.name)}
                                     style={{
+                                      minWidth: 68,
+                                      display: "inline-flex",
+                                      alignItems: "center",
+                                      justifyContent: "center",
                                       background: ui.accent,
                                       color: ui.accentContrast,
                                       border: "none",

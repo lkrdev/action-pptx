@@ -6,8 +6,10 @@ import io
 import json
 import os
 import secrets
+import urllib.parse
 import urllib.request
 import zipfile
+from collections.abc import Mapping
 from datetime import UTC, datetime
 
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -31,7 +33,7 @@ from action_pptx.config import (
 )
 from pptx_merge.engine import MergeError, merge_pptx
 from pptx_merge.inspector import TileSchema, inspect_and_validate
-from pptx_merge.themes import PPTX_THEMES, resolve_pptx_theme, theme_from_looker_palette
+from pptx_merge.themes import PptxTheme, resolve_pptx_theme, theme_from_looker_palette
 
 ACTION_NAME = "action-pptx"
 ACTION_ICON_SVG = (
@@ -301,6 +303,38 @@ def _require_viewer_auth(
         )
     auth_mode, oauth_token = _require_extension_auth(authorization, settings)
     return oauth_token if (auth_mode == "oauth" and settings.oauth_gcs_passthrough) else None
+
+
+def _resolve_action_theme(
+    request: Request,
+    plan_url: str,
+    form_params: Mapping[str, object],
+    data: Mapping[str, object],
+) -> PptxTheme | None:
+    url_qs = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(plan_url).query))
+    theme_val = (
+        request.query_params.get("theme")
+        or request.query_params.get("_theme")
+        or url_qs.get("theme")
+        or url_qs.get("_theme")
+        or form_params.get("theme")
+        or data.get("theme")
+        or data.get("_theme")
+    )
+    if isinstance(theme_val, Mapping):
+        return theme_from_looker_palette(str(theme_val.get("name") or "URL_Theme"), theme_val)
+    raw_theme = str(theme_val or "").strip()
+    if raw_theme.startswith("{"):
+        try:
+            parsed = json.loads(raw_theme)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            return theme_from_looker_palette(str(parsed.get("name") or "URL_Theme"), parsed)
+    user_brand = str(
+        request.query_params.get("brand") or url_qs.get("brand") or data.get("brand") or ""
+    ).strip()
+    return resolve_pptx_theme(raw_theme or None, brand=user_brand or None)
 
 
 def _decode_base64_payload(b64_str: str, label: str) -> bytes:
@@ -581,26 +615,6 @@ def create_app() -> FastAPI:
                     "options": [{"name": t, "label": t} for t in templates],
                 },
                 {
-                    "name": "theme",
-                    "label": "Slide Theme / Brand Palette",
-                    "description": (
-                        "Optional brand/theme palette (or 'auto' to use user attribute / template)."
-                    ),
-                    "type": "select",
-                    "required": False,
-                    "default": "auto",
-                    "options": [
-                        {"name": "auto", "label": "Auto (User Attribute / Template Default)"},
-                        *[
-                            {
-                                "name": key,
-                                "label": f"{val.brand} — {val.mode.title()} ({key})",
-                            }
-                            for key, val in PPTX_THEMES.items()
-                        ],
-                    ],
-                },
-                {
                     "name": "filename_prefix",
                     "label": "Output Filename Prefix",
                     "description": (
@@ -615,6 +629,7 @@ def create_app() -> FastAPI:
 
     @app.post("/actions/pptx/execute")
     async def action_execute(
+        request: Request,
         payload: ActionWebhookRequest,
         authorization: str | None = Header(default=None),
         x_looker_webhook_id: str | None = Header(default=None),
@@ -721,11 +736,12 @@ def create_app() -> FastAPI:
                 "webhook_id": webhook_id,
             }
 
-            raw_theme = str(
-                payload.form_params.get("theme") or payload.data.get("theme") or ""
-            ).strip()
-            user_brand = str(payload.data.get("brand") or "").strip()
-            resolved_theme = resolve_pptx_theme(raw_theme or None, brand=user_brand or None)
+            resolved_theme = _resolve_action_theme(
+                request,
+                str(plan_meta["url"]),
+                payload.form_params,
+                payload.data,
+            )
 
             merge_res = merge_pptx(
                 template_bytes,
@@ -736,7 +752,6 @@ def create_app() -> FastAPI:
             out_gcs_uri = gcs.write_timestamped_output(
                 output_uri,
                 filename_prefix,
-                webhook_id,
                 merge_res.pptx_bytes,
                 settings.allowed_gcs_buckets,
                 oauth_token=passthrough_token,
