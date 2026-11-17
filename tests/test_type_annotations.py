@@ -87,3 +87,24 @@ def test_readme_manifest_matches_manifest_lkml() -> None:
         assert manifest_text in example_manifest.read_text(encoding="utf-8"), (
             "assets/lookml/manifest.lkml does not contain the root manifest.lkml block!"
         )
+
+
+def test_deploy_docs_and_cli_reference() -> None:
+    deploy_md = REPO_ROOT / "deploy.md"
+    cli_docs = REPO_ROOT / "deploy_cli_docs.md"
+    deploy_py = REPO_ROOT / "bin" / "deploy.py"
+    assert deploy_md.exists() and cli_docs.exists()
+    assert "deploy_cli_docs.md" in deploy_md.read_text(encoding="utf-8")
+    tree = ast.parse(deploy_py.read_text(encoding="utf-8"), filename=str(deploy_py))
+    main_fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "main")
+    flags = [
+        part
+        for default in main_fn.args.defaults
+        for node in ast.walk(default)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+        for part in node.value.split("/")
+        if part.startswith("--")
+    ]
+    cli_text = cli_docs.read_text(encoding="utf-8")
+    missing = [f for f in flags if f not in cli_text]
+    assert not missing, f"deploy_cli_docs.md missing flags from bin/deploy.py: {missing}"

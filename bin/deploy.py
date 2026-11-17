@@ -722,4 +722,13 @@ def main(
 
 
 if __name__ == "__main__":
-    typer.run(main)
+    if docs_out := os.environ.pop("GENERATE_DEPLOY_CLI_DOCS", ""):
+        import typer.cli
+
+        app = typer.Typer()
+        app.command()(main)
+        cmd = typer.main.get_command(app)
+        docs = typer.cli.get_docs_for_click(obj=cmd, ctx=typer.Context(cmd), name="./deploy.sh")
+        Path(docs_out).write_text(f"{docs.strip()}\n", encoding="utf-8")
+    else:
+        typer.run(main)
