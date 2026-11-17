@@ -34,6 +34,7 @@ if str(BIN_DIR) not in sys.path:
 from register_integration import (  # noqa: E402
     build_manifest_application_block,
     list_looker_connections,
+    normalize_service_base,
     register_action_hub_and_extension,
 )
 
@@ -195,6 +196,16 @@ def main(
         envvar="REQUIRED_USER_ATTRIBUTE",
         help="Optional Looker User Attribute name to restrict who can see and execute this action",
     ),
+    public_base_url: str | None = typer.Option(
+        None,
+        "--public-base-url",
+        help="Public URL if fronted by a load balancer or proxy (defaults to Cloud Run URL)",
+    ),
+    looker_only: bool = typer.Option(
+        False,
+        "--looker-only",
+        help="Skip GCP provisioning/deploy and only configure Looker (reads existing secret & URL)",
+    ),
 ) -> None:
     console.print(
         Panel.fit(
@@ -255,7 +266,7 @@ def main(
     output_gcs_uri = f"gs://{bucket_name}/output"
 
     if register_looker is None:
-        register_looker = bool(
+        register_looker = looker_only or bool(
             questionary.confirm(
                 "Do you want to automatically configure the Action Hub & Extension in Looker?",
                 default=True,
@@ -322,42 +333,46 @@ def main(
                 or "action_pptx_extension"
             )
             if not looker_connection:
-                with console.status("[bold cyan]Fetching Looker database connections..."):
-                    connections = list_looker_connections(
-                        looker_url,
-                        looker_client_id,
-                        looker_client_secret,
-                        oauth_account=looker_oauth_account,
-                    )
-                if not connections:
-                    console.print(
-                        "[bold red]No database connections found on this Looker "
-                        "instance.[/bold red]"
-                    )
-                    raise typer.Exit(1)
-
-                conn_table = Table(
-                    title="Available Looker Database Connections",
-                    show_header=True,
-                    header_style="bold cyan",
-                )
-                conn_table.add_column("Connection Name", style="green")
-                conn_table.add_column("Dialect", style="magenta")
-                conn_table.add_column("Database / Project", style="white")
-                for cname, cdialect, cdb in connections:
-                    conn_table.add_row(cname, cdialect or "-", cdb or "-")
-                console.print("\n", conn_table)
-
-                looker_connection = questionary.select(
-                    f"Select database connection for model '{looker_model}':",
-                    choices=[
-                        questionary.Choice(
-                            f"{cname} ({cdialect})" if cdialect else cname,
-                            value=cname,
+                try:
+                    with console.status("[bold cyan]Fetching Looker database connections..."):
+                        connections = list_looker_connections(
+                            looker_url,
+                            looker_client_id,
+                            looker_client_secret,
+                            oauth_account=looker_oauth_account,
                         )
-                        for cname, cdialect, _ in connections
-                    ],
-                ).ask()
+                except Exception as exc:
+                    console.print(
+                        f"[yellow]Warning: Could not fetch Looker connections ({exc}).[/yellow]"
+                    )
+                    connections = []
+                if connections:
+                    conn_table = Table(
+                        title="Available Looker Database Connections",
+                        show_header=True,
+                        header_style="bold cyan",
+                    )
+                    conn_table.add_column("Connection Name", style="green")
+                    conn_table.add_column("Dialect", style="magenta")
+                    conn_table.add_column("Database / Project", style="white")
+                    for cname, cdialect, cdb in connections:
+                        conn_table.add_row(cname, cdialect or "-", cdb or "-")
+                    console.print("\n", conn_table)
+
+                    looker_connection = questionary.select(
+                        f"Select database connection for model '{looker_model}':",
+                        choices=[
+                            questionary.Choice(
+                                f"{cname} ({cdialect})" if cdialect else cname,
+                                value=cname,
+                            )
+                            for cname, cdialect, _ in connections
+                        ],
+                    ).ask()
+                else:
+                    looker_connection = (
+                        questionary.text("Enter Looker database connection name:").ask() or ""
+                    )
                 if not looker_connection:
                     console.print("[bold red]Error: A connection must be selected.[/bold red]")
                     raise typer.Exit(1)
@@ -372,184 +387,234 @@ def main(
     else:
         resolved_ext_mode = resolved_ext_mode or "existing"
 
-    apis = [
-        "run.googleapis.com",
-        "secretmanager.googleapis.com",
-        "storage.googleapis.com",
-        "cloudbuild.googleapis.com",
-        "artifactregistry.googleapis.com",
-    ]
-    with console.status("[bold green]Enabling Google Cloud APIs (this may take a minute)..."):
-        run_cmd(["gcloud", "services", "enable", *apis], capture_output=True)
-    console.print("[bold green]OK[/bold green] Google Cloud APIs enabled.")
-
-    if (
-        run_cmd(
-            ["gcloud", "storage", "buckets", "describe", f"gs://{bucket_name}"],
-            check=False,
-            capture_output=True,
-        ).returncode
-        != 0
-    ):
+    repo_root = BIN_DIR.parent
+    if looker_only:
         console.print(
-            f"Creating GCS bucket [bold cyan]gs://{bucket_name}[/bold cyan] in {region}..."
+            "\n[bold cyan]Skipping GCP deployment; reading existing secret and URL...[/bold cyan]"
         )
-        run_cmd(
-            [
-                "gcloud",
-                "storage",
-                "buckets",
-                "create",
-                f"gs://{bucket_name}",
-                f"--location={region}",
-            ]
+        action_hub_secret_val = run_cmd(
+            ["gcloud", "secrets", "versions", "access", "latest", "--secret=action-hub-secret"],
+            capture_output=True,
+        ).stdout.strip()
+        effective_url = (
+            normalize_service_base(public_base_url)
+            if public_base_url
+            else run_cmd(
+                [
+                    "gcloud",
+                    "run",
+                    "services",
+                    "describe",
+                    "action-pptx",
+                    "--platform=managed",
+                    f"--region={region}",
+                    "--format=value(status.url)",
+                ],
+                capture_output=True,
+            ).stdout.strip()
         )
     else:
-        console.print(f"GCS bucket [bold green]gs://{bucket_name}[/bold green] already exists.")
+        apis = [
+            "run.googleapis.com",
+            "secretmanager.googleapis.com",
+            "storage.googleapis.com",
+            "cloudbuild.googleapis.com",
+            "artifactregistry.googleapis.com",
+        ]
+        with console.status("[bold green]Enabling Google Cloud APIs (this may take a minute)..."):
+            run_cmd(["gcloud", "services", "enable", *apis], capture_output=True)
+        console.print("[bold green]OK[/bold green] Google Cloud APIs enabled.")
 
-    repo_root = BIN_DIR.parent
-    for sample_name in ("simple_template.pptx", "embed_demo_template.pptx"):
-        sample_file = repo_root / "assets" / sample_name
-        if sample_file.is_file():
+        if (
+            run_cmd(
+                ["gcloud", "storage", "buckets", "describe", f"gs://{bucket_name}"],
+                check=False,
+                capture_output=True,
+            ).returncode
+            != 0
+        ):
             console.print(
-                "Uploading sample template to "
-                f"[bold cyan]{templates_gcs_uri}/{sample_name}[/bold cyan]..."
+                f"Creating GCS bucket [bold cyan]gs://{bucket_name}[/bold cyan] in {region}..."
             )
             run_cmd(
                 [
                     "gcloud",
                     "storage",
-                    "cp",
-                    str(sample_file),
-                    f"{templates_gcs_uri}/{sample_name}",
+                    "buckets",
+                    "create",
+                    f"gs://{bucket_name}",
+                    f"--location={region}",
+                ]
+            )
+        else:
+            console.print(f"GCS bucket [bold green]gs://{bucket_name}[/bold green] already exists.")
+
+        for sample_name in ("simple_template.pptx", "embed_demo_template.pptx"):
+            sample_file = repo_root / "assets" / sample_name
+            if sample_file.is_file():
+                console.print(
+                    "Uploading sample template to "
+                    f"[bold cyan]{templates_gcs_uri}/{sample_name}[/bold cyan]..."
+                )
+                run_cmd(
+                    [
+                        "gcloud",
+                        "storage",
+                        "cp",
+                        str(sample_file),
+                        f"{templates_gcs_uri}/{sample_name}",
+                    ],
+                    capture_output=True,
+                )
+
+        if (
+            run_cmd(
+                ["gcloud", "secrets", "describe", "action-hub-secret"],
+                check=False,
+                capture_output=True,
+            ).returncode
+            == 0
+        ):
+            console.print("Retrieving existing [bold cyan]action-hub-secret[/bold cyan] secret...")
+            action_hub_secret_val = run_cmd(
+                [
+                    "gcloud",
+                    "secrets",
+                    "versions",
+                    "access",
+                    "latest",
+                    "--secret=action-hub-secret",
                 ],
                 capture_output=True,
+            ).stdout.strip()
+        else:
+            action_hub_secret_val = secrets.token_hex(32)
+            console.print("Creating secret [bold cyan]action-hub-secret[/bold cyan]...")
+            run_cmd(
+                [
+                    "gcloud",
+                    "secrets",
+                    "create",
+                    "action-hub-secret",
+                    "--replication-policy=automatic",
+                ]
+            )
+            run_cmd(
+                ["gcloud", "secrets", "versions", "add", "action-hub-secret", "--data-file=-"],
+                capture_output=True,
+                input_text=action_hub_secret_val,
             )
 
-    if not service_account_email:
-        project_number = run_cmd(
-            ["gcloud", "projects", "describe", project_id, "--format=value(projectNumber)"],
-            capture_output=True,
-        ).stdout.strip()
-        service_account_email = f"{project_number}-compute@developer.gserviceaccount.com"
+        if not service_account_email:
+            project_number = run_cmd(
+                ["gcloud", "projects", "describe", project_id, "--format=value(projectNumber)"],
+                capture_output=True,
+            ).stdout.strip()
+            service_account_email = f"{project_number}-compute@developer.gserviceaccount.com"
 
-    console.print(f"Granting runtime roles to [bold cyan]{service_account_email}[/bold cyan]...")
-    for role in (
-        "roles/secretmanager.secretAccessor",
-        "roles/storage.objectAdmin",
-        "roles/logging.logWriter",
-    ):
-        run_cmd_with_retry(
+        console.print(
+            f"Granting runtime roles to [bold cyan]{service_account_email}[/bold cyan]..."
+        )
+        for base_cmd, role in (
+            (
+                ["gcloud", "secrets", "add-iam-policy-binding", "action-hub-secret"],
+                "roles/secretmanager.secretAccessor",
+            ),
+            (
+                ["gcloud", "storage", "buckets", "add-iam-policy-binding", f"gs://{bucket_name}"],
+                "roles/storage.objectAdmin",
+            ),
+            (
+                ["gcloud", "projects", "add-iam-policy-binding", project_id],
+                "roles/logging.logWriter",
+            ),
+        ):
+            run_cmd_with_retry(
+                [
+                    *base_cmd,
+                    f"--member=serviceAccount:{service_account_email}",
+                    f"--role={role}",
+                    "--condition=None",
+                ],
+                error_substrings=["does not exist", "INVALID_ARGUMENT"],
+            )
+
+        console.print("\n[bold cyan]Deploying action-pptx to Google Cloud Run...[/bold cyan]")
+        source_args = (
+            ["--source", str(repo_root)]
+            if from_source
+            else [
+                "--image",
+                "us-central1-docker.pkg.dev/lkr-dev-production/looker-action/action-pptx:latest",
+            ]
+        )
+        env_vars = [
+            f"ALLOWED_GCS_BUCKETS={bucket_name}",
+            "ACTION_HUB_LABEL=Looker PowerPoint Action Hub",
+            f"ACTION_LABEL={action_label}",
+            "PUBLIC_BASE_URL=http://placeholder",
+        ]
+        if required_user_attribute.strip():
+            env_vars.append(f"REQUIRED_USER_ATTRIBUTE={required_user_attribute.strip()}")
+        if oauth_client_id:
+            env_vars.extend(
+                [
+                    f"GOOGLE_OAUTH_CLIENT_ID={oauth_client_id}",
+                    f"GOOGLE_OAUTH_CLIENT_SECRET={oauth_client_secret or ''}",
+                    "OAUTH_GCS_PASSTHROUGH=true",
+                ]
+            )
+
+        run_cmd(
             [
                 "gcloud",
-                "projects",
-                "add-iam-policy-binding",
-                project_id,
-                f"--member=serviceAccount:{service_account_email}",
-                f"--role={role}",
-            ],
-            error_substrings=["does not exist", "INVALID_ARGUMENT"],
-        )
-
-    if (
-        run_cmd(
-            ["gcloud", "secrets", "describe", "action-hub-secret"],
-            check=False,
-            capture_output=True,
-        ).returncode
-        == 0
-    ):
-        console.print("Retrieving existing [bold cyan]action-hub-secret[/bold cyan] secret...")
-        action_hub_secret_val = run_cmd(
-            ["gcloud", "secrets", "versions", "access", "latest", "--secret=action-hub-secret"],
-            capture_output=True,
-        ).stdout.strip()
-    else:
-        action_hub_secret_val = secrets.token_hex(32)
-        console.print("Creating secret [bold cyan]action-hub-secret[/bold cyan]...")
-        run_cmd(
-            ["gcloud", "secrets", "create", "action-hub-secret", "--replication-policy=automatic"]
-        )
-        run_cmd(
-            ["gcloud", "secrets", "versions", "add", "action-hub-secret", "--data-file=-"],
-            capture_output=True,
-            input_text=action_hub_secret_val,
-        )
-
-    console.print("\n[bold cyan]Deploying action-pptx to Google Cloud Run...[/bold cyan]")
-    source_args = (
-        ["--source", str(repo_root)]
-        if from_source
-        else [
-            "--image",
-            "us-central1-docker.pkg.dev/lkr-dev-production/looker-action/action-pptx:latest",
-        ]
-    )
-    env_vars = [
-        f"ALLOWED_GCS_BUCKETS={bucket_name}",
-        "ACTION_HUB_LABEL=Looker PowerPoint Action Hub",
-        f"ACTION_LABEL={action_label}",
-        "PUBLIC_BASE_URL=http://placeholder",
-    ]
-    if required_user_attribute.strip():
-        env_vars.append(f"REQUIRED_USER_ATTRIBUTE={required_user_attribute.strip()}")
-    if oauth_client_id:
-        env_vars.extend(
-            [
-                f"GOOGLE_OAUTH_CLIENT_ID={oauth_client_id}",
-                f"GOOGLE_OAUTH_CLIENT_SECRET={oauth_client_secret or ''}",
-                "OAUTH_GCS_PASSTHROUGH=true",
+                "run",
+                "deploy",
+                "action-pptx",
+                "--platform=managed",
+                f"--region={region}",
+                "--no-invoker-iam-check",
+                "--cpu=2",
+                "--memory=2Gi",
+                "--timeout=540s",
+                "--concurrency=2",
+                f"--service-account={service_account_email}",
+                f"--set-env-vars={','.join(env_vars)}",
+                "--set-secrets=ACTION_HUB_SECRET=action-hub-secret:latest",
+                *source_args,
             ]
         )
 
-    run_cmd(
-        [
-            "gcloud",
-            "run",
-            "deploy",
-            "action-pptx",
-            "--platform=managed",
-            f"--region={region}",
-            "--no-invoker-iam-check",
-            "--cpu=2",
-            "--memory=2Gi",
-            "--timeout=540s",
-            "--concurrency=2",
-            f"--service-account={service_account_email}",
-            f"--set-env-vars={','.join(env_vars)}",
-            "--set-secrets=ACTION_HUB_SECRET=action-hub-secret:latest",
-            *source_args,
-        ]
-    )
+        service_url = run_cmd(
+            [
+                "gcloud",
+                "run",
+                "services",
+                "describe",
+                "action-pptx",
+                "--platform=managed",
+                f"--region={region}",
+                "--format=value(status.url)",
+            ],
+            capture_output=True,
+        ).stdout.strip()
+        console.print(f"Deployed Service URL: [bold green]{service_url}[/bold green]")
+        effective_url = normalize_service_base(public_base_url) if public_base_url else service_url
 
-    service_url = run_cmd(
-        [
-            "gcloud",
-            "run",
-            "services",
-            "describe",
-            "action-pptx",
-            "--platform=managed",
-            f"--region={region}",
-            "--format=value(status.url)",
-        ],
-        capture_output=True,
-    ).stdout.strip()
-    console.print(f"Deployed Service URL: [bold green]{service_url}[/bold green]")
-
-    run_cmd(
-        [
-            "gcloud",
-            "run",
-            "services",
-            "update",
-            "action-pptx",
-            "--platform=managed",
-            f"--region={region}",
-            f"--update-env-vars=PUBLIC_BASE_URL={service_url}",
-        ],
-        capture_output=True,
-    )
+    if not looker_only or public_base_url:
+        run_cmd(
+            [
+                "gcloud",
+                "run",
+                "services",
+                "update",
+                "action-pptx",
+                "--platform=managed",
+                f"--region={region}",
+                f"--update-env-vars=PUBLIC_BASE_URL={effective_url}",
+            ],
+            capture_output=True,
+        )
 
     nonce = secrets.token_bytes(32).hex()
     digest = hmac.new(
@@ -558,30 +623,34 @@ def main(
     api_key_token = f"{nonce}/{digest}"
 
     deployed_extension_id: str | None = None
+    looker_warnings: list[str] = []
     if register_looker:
         console.print("\n[bold cyan]Configuring Looker Action Hub & Extension...[/bold cyan]")
-        bundle_path = (
-            _maybe_build_extension_bundle(repo_root) if resolved_ext_mode == "new" else None
-        )
-        deployed_extension_id = register_action_hub_and_extension(
-            service_url=service_url,
-            api_key_token=api_key_token,
-            templates_gcs_uri=templates_gcs_uri,
-            output_gcs_uri=output_gcs_uri,
-            required_user_attribute=required_user_attribute,
-            extension_mode=resolved_ext_mode,
-            project_id=looker_project or "action-pptx",
-            model_name=looker_model or "action_pptx_extension",
-            connection_name=looker_connection or "",
-            bundle_path=bundle_path,
-            include_sample_lookml=bool(include_sample_lookml),
-            oauth_client_id=oauth_client_id or None,
-            oauth_gcs_passthrough=bool(oauth_client_id),
-            base_url=looker_url,
-            client_id=looker_client_id,
-            client_secret=looker_client_secret,
-            oauth_account=looker_oauth_account,
-        )
+        try:
+            bundle_path = (
+                _maybe_build_extension_bundle(repo_root) if resolved_ext_mode == "new" else None
+            )
+            deployed_extension_id, looker_warnings = register_action_hub_and_extension(
+                service_url=effective_url,
+                api_key_token=api_key_token,
+                templates_gcs_uri=templates_gcs_uri,
+                output_gcs_uri=output_gcs_uri,
+                required_user_attribute=required_user_attribute,
+                extension_mode=resolved_ext_mode,
+                project_id=looker_project or "action-pptx",
+                model_name=looker_model or "action_pptx_extension",
+                connection_name=looker_connection or "",
+                bundle_path=bundle_path,
+                include_sample_lookml=bool(include_sample_lookml),
+                oauth_client_id=oauth_client_id or None,
+                oauth_gcs_passthrough=bool(oauth_client_id),
+                base_url=looker_url,
+                client_id=looker_client_id,
+                client_secret=looker_client_secret,
+                oauth_account=looker_oauth_account,
+            )
+        except Exception as exc:
+            looker_warnings.append(f"Looker configuration failed: {exc}")
 
     table = Table(
         title="Looker Action Hub & Extension Details",
@@ -590,7 +659,7 @@ def main(
     )
     table.add_column("Parameter", style="cyan", width=32)
     table.add_column("Value", style="green", overflow="fold")
-    table.add_row("Action Hub URL", service_url)
+    table.add_row("Action Hub URL", effective_url)
     table.add_row("Authorization Token (API Key)", api_key_token)
     table.add_row("Templates GCS URI", templates_gcs_uri)
     table.add_row("Output GCS Package Bucket URI", output_gcs_uri)
@@ -607,12 +676,17 @@ def main(
             )
             table.add_row("Sample LookML Dashboard", sample_dash_link)
 
+    panel_title = (
+        "[bold yellow]Deployment Completed with Looker Warnings[/bold yellow]"
+        if looker_warnings
+        else "[bold green]Deployment & Configuration Successful![/bold green]"
+    )
     console.print(
         "\n",
         Panel.fit(
             table,
-            title="[bold green]Deployment & Configuration Successful![/bold green]",
-            border_style="green",
+            title=panel_title,
+            border_style="yellow" if looker_warnings else "green",
             padding=(1, 2),
         ),
     )
@@ -625,7 +699,7 @@ def main(
         )
 
     if resolved_ext_mode == "existing":
-        manifest_snippet = build_manifest_application_block(service_url, use_local_bundle=False)
+        manifest_snippet = build_manifest_application_block(effective_url, use_local_bundle=False)
         console.print(
             "\n",
             Panel(
@@ -638,6 +712,13 @@ def main(
         console.print(
             f"\n[bold cyan]Raw copyable manifest.lkml block:[/bold cyan]\n{manifest_snippet}\n"
         )
+
+    if looker_warnings:
+        console.print(
+            "\n[bold yellow]Looker warnings (re-run anytime with --looker-only):[/bold yellow]"
+        )
+        for warning in looker_warnings:
+            console.print(f"  [yellow]- {warning}[/yellow]")
 
 
 if __name__ == "__main__":
