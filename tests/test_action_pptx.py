@@ -844,7 +844,7 @@ def test_register_action_hub_passes_integration_id_to_update_data_app(
     monkeypatch.setattr(register_integration, "_load_bundle_js", lambda _p=None: "console.log(1);")
     monkeypatch.setattr(subprocess, "run", lambda *a, **kw: subprocess.CompletedProcess(a[0], 0))
 
-    ext_id = register_integration.register_action_hub_and_extension(
+    ext_id, warnings = register_integration.register_action_hub_and_extension(
         service_url="https://action-pptx.a.run.app",
         api_key_token="nonce/digest",
         templates_gcs_uri="gs://b/templates",
@@ -854,6 +854,7 @@ def test_register_action_hub_passes_integration_id_to_update_data_app(
         connection_name="bq_conn",
     )
     assert ext_id == "my-proj::action_pptx_template_manager"
+    assert warnings == []
     cfg_call = next(c for c in calls if c.get("action") == "configure_extension")
     assert cfg_call["action_integration_id"] == "42::action-pptx"
 
@@ -995,3 +996,31 @@ async def test_outputs_viewer_routes_and_disable_env(
             json={"templates_gcs_uri": "gs://templates-bucket/team"},
         )
         assert r_tpl_off.status_code == 403
+
+
+def test_register_action_hub_soft_fails_without_blocking_extension(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import bin.register_integration as reg
+
+    def fake_codemode(**_kwargs: object) -> object:
+        raise RuntimeError("SocketError: name or service not known")
+
+    monkeypatch.setattr(reg, "_run_lkr_codemode", fake_codemode)
+    monkeypatch.setattr(
+        reg,
+        "deploy_extension_to_new_project",
+        lambda *_args, **_kwargs: "action-pptx::action_pptx_template_manager",
+    )
+
+    ext_id, warnings = reg.register_action_hub_and_extension(
+        service_url="https://www.lkr.dev/apps/action-pptx-test",
+        api_key_token="raw-secret",
+        templates_gcs_uri="gs://b/templates",
+        output_gcs_uri="gs://b/output",
+        extension_mode="new",
+        connection_name="bq_conn",
+    )
+    assert ext_id == "action-pptx::action_pptx_template_manager"
+    assert len(warnings) == 1
+    assert "Action Hub registration failed" in warnings[0]

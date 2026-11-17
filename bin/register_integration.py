@@ -344,7 +344,8 @@ def register_action_hub_and_extension(
     client_id: str | None = None,
     client_secret: str | None = None,
     oauth_account: str | None = None,
-) -> str | None:
+) -> tuple[str | None, list[str]]:
+    warnings: list[str] = []
     token = api_key_token
     if "/" not in token:
         nonce = secrets.token_bytes(32).hex()
@@ -352,69 +353,83 @@ def register_action_hub_and_extension(
         token = f"{nonce}/{digest}"
 
     url = normalize_service_base(service_url)
-    print(f"Registering Integration Hub {url} via lkr-dev-cli code-mode...")
-    res: object = {}
-    for attempt in range(3):
+    action_integration_id = ""
+    try:
+        print(f"Registering Integration Hub {url} via lkr-dev-cli code-mode...")
+        res: object = {}
+        for attempt in range(3):
+            try:
+                res = _run_lkr_codemode(
+                    file_path=CODEMODE_SCRIPT,
+                    variables={
+                        "action": "setup_hub",
+                        "service_url": url,
+                        "api_key_token": token,
+                        "templates_gcs_uri": templates_gcs_uri,
+                        "output_gcs_uri": output_gcs_uri,
+                        "required_user_attribute": required_user_attribute,
+                        "extension_mode": extension_mode,
+                        "project_id": project_id,
+                    },
+                    base_url=base_url,
+                    client_id=client_id,
+                    client_secret=client_secret,
+                    oauth_account=oauth_account,
+                    dev=True,
+                )
+                break
+            except RuntimeError as exc:
+                if "Could not find action-pptx integration" not in str(exc) or attempt == 2:
+                    raise
+                time.sleep(3)
+        if isinstance(res, dict):
+            action_integration_id = str(res.get("integration_id") or "").strip()
+            print(
+                f"Integration Hub {res.get('hub_action', 'configured')} "
+                f"(ID: {res.get('hub_id')}), enabled {res.get('integration_id')}!"
+            )
+            if required_user_attribute.strip() and not res.get("bound_user_attribute"):
+                print(
+                    f"Note: User attribute '{required_user_attribute.strip()}' does not exist "
+                    "yet in Looker; create it under Admin -> User Attributes and bind it on "
+                    "the action."
+                )
+    except Exception as exc:
+        msg = f"Action Hub registration failed: {exc}"
+        print(f"Warning: {msg}")
+        warnings.append(msg)
+
+    deployed_extension_id: str | None = None
+    if extension_mode == "new":
         try:
-            res = _run_lkr_codemode(
-                file_path=CODEMODE_SCRIPT,
-                variables={
-                    "action": "setup_hub",
-                    "service_url": url,
-                    "api_key_token": token,
-                    "templates_gcs_uri": templates_gcs_uri,
-                    "output_gcs_uri": output_gcs_uri,
-                    "required_user_attribute": required_user_attribute,
-                    "extension_mode": extension_mode,
-                    "project_id": project_id,
-                },
+            if not connection_name:
+                raise RuntimeError(
+                    "A Looker database connection name is required to deploy a new "
+                    "Extension project."
+                )
+            deployed_extension_id = deploy_extension_to_new_project(
+                service_url=url,
+                templates_gcs_uri=templates_gcs_uri,
+                output_gcs_uri=output_gcs_uri,
+                action_integration_id=action_integration_id,
+                project_id=project_id,
+                model_name=model_name,
+                connection_name=connection_name,
+                bundle_path=bundle_path,
+                include_sample_lookml=include_sample_lookml,
+                oauth_client_id=oauth_client_id,
+                oauth_gcs_passthrough=oauth_gcs_passthrough,
                 base_url=base_url,
                 client_id=client_id,
                 client_secret=client_secret,
                 oauth_account=oauth_account,
-                dev=True,
             )
-            break
-        except RuntimeError as exc:
-            if "Could not find action-pptx integration" not in str(exc) or attempt == 2:
-                raise
-            time.sleep(3)
-    action_integration_id = ""
-    if isinstance(res, dict):
-        action_integration_id = str(res.get("integration_id") or "").strip()
-        print(
-            f"Integration Hub {res.get('hub_action', 'configured')} "
-            f"(ID: {res.get('hub_id')}), enabled {res.get('integration_id')}!"
-        )
-        if required_user_attribute.strip() and not res.get("bound_user_attribute"):
-            print(
-                f"Note: User attribute '{required_user_attribute.strip()}' does not exist yet in "
-                "Looker; create it under Admin -> User Attributes and bind it on the action."
-            )
+        except Exception as exc:
+            msg = f"LookML Extension deployment failed: {exc}"
+            print(f"Warning: {msg}")
+            warnings.append(msg)
 
-    if extension_mode == "new":
-        if not connection_name:
-            raise RuntimeError(
-                "A Looker database connection name is required to deploy a new Extension project."
-            )
-        return deploy_extension_to_new_project(
-            service_url=url,
-            templates_gcs_uri=templates_gcs_uri,
-            output_gcs_uri=output_gcs_uri,
-            action_integration_id=action_integration_id,
-            project_id=project_id,
-            model_name=model_name,
-            connection_name=connection_name,
-            bundle_path=bundle_path,
-            include_sample_lookml=include_sample_lookml,
-            oauth_client_id=oauth_client_id,
-            oauth_gcs_passthrough=oauth_gcs_passthrough,
-            base_url=base_url,
-            client_id=client_id,
-            client_secret=client_secret,
-            oauth_account=oauth_account,
-        )
-    return None
+    return deployed_extension_id, warnings
 
 
 def main() -> None:
