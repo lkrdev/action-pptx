@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+from pathlib import Path
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -742,6 +743,59 @@ def test_looker_palette_preview_and_deploy_manifest_helpers(
     )
     assert resp.status_code == 200
     assert len(resp.json()["pptx_base64"]) > 1000
+
+
+def test_stage_lookml_project_dir_and_codemode_ast(tmp_path: Path) -> None:
+    import ast
+
+    from bin.register_integration import stage_lookml_project_dir
+
+    fake_bundle = tmp_path / "bundle.js"
+    fake_bundle.write_text("console.log('action-pptx');", encoding="utf-8")
+
+    staged_sample = tmp_path / "with_sample"
+    used_local = stage_lookml_project_dir(
+        staged_sample,
+        service_url="https://action-pptx.a.run.app/",
+        project_id="my-pptx-proj",
+        model_name="custom_pptx_model",
+        connection_name="bq_conn",
+        bundle_path=str(fake_bundle),
+        include_sample_lookml=True,
+    )
+    assert used_local is True
+    assert (staged_sample / "bundle.js").read_text(
+        encoding="utf-8"
+    ) == "console.log('action-pptx');"
+    manifest = (staged_sample / "manifest.lkml").read_text(encoding="utf-8")
+    assert 'project_name: "my-pptx-proj"' in manifest
+    assert 'file: "bundle.js"' in manifest
+    assert 'url: "https://cdn.lkr.dev' not in manifest
+    assert '"https://action-pptx.a.run.app/*"' in manifest
+
+    model_txt = (staged_sample / "models" / "custom_pptx_model.model.lkml").read_text(
+        encoding="utf-8"
+    )
+    assert 'connection: "bq_conn"' in model_txt
+    assert (staged_sample / "views" / "inventory_items.view.lkml").is_file()
+    dash_txt = (
+        staged_sample / "dashboards" / "executive_business_review.dashboard.lookml"
+    ).read_text(encoding="utf-8")
+    assert "model: custom_pptx_model" in dash_txt
+
+    codemode_path = Path(__file__).resolve().parent.parent / "bin" / "looker_codemode.py"
+    codemode_src = codemode_path.read_text(encoding="utf-8")
+    ast.parse(codemode_src)
+    for key in (
+        "cloudRunUrl",
+        "templatesGcsUri",
+        "outputGcsUri",
+        "useOAuth",
+        "oauthClientId",
+        "oauthGcsPassthrough",
+        "update_data_app",
+    ):
+        assert key in codemode_src
 
 
 @pytest.mark.asyncio

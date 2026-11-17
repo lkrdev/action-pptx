@@ -1,27 +1,27 @@
 #!/usr/bin/env uv run
 # /// script
 # requires-python = ">=3.14"
-# dependencies = [
-#     "looker-sdk>=24.0.0",
-# ]
+# dependencies = []
 # ///
 
 from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import os
 import re
 import secrets
+import subprocess
+import tempfile
 import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
 
-if TYPE_CHECKING:
-    from looker_sdk.sdk.api40.methods import Looker40SDK
-
+BIN_DIR = Path(__file__).resolve().parent
+REPO_ROOT = BIN_DIR.parent
+CODEMODE_SCRIPT = BIN_DIR / "looker_codemode.py"
 CDN_BUNDLE_URL = "https://cdn.lkr.dev/apps/action-pptx/latest/bundle.js"
 EXTENSION_APP_ID = "action_pptx_template_manager"
 
@@ -46,73 +46,13 @@ def build_manifest_application_block(
     use_local_bundle: bool = False,
 ) -> str:
     base = normalize_service_base(service_url)
-    template = (
-        (Path(__file__).resolve().parent.parent / "manifest.lkml")
-        .read_text(encoding="utf-8")
-        .strip()
-    )
+    template = (REPO_ROOT / "manifest.lkml").read_text(encoding="utf-8").strip()
     if use_local_bundle:
         template = re.sub(r'^\s*url:\s*"[^"]+"', '  file: "bundle.js"', template, flags=re.M)
     urls_block = (
         f'    external_api_urls: [\n      "{base}",\n      "{base}/",\n      "{base}/*"\n    ]'
     )
     return re.sub(r"    external_api_urls:\s*\[[^\]]*\]", urls_block, template)
-
-
-def _init_sdk(
-    base_url: str | None = None,
-    client_id: str | None = None,
-    client_secret: str | None = None,
-) -> Looker40SDK:
-    import looker_sdk
-
-    if base_url:
-        os.environ["LOOKERSDK_BASE_URL"] = base_url.strip().rstrip("/")
-    if client_id:
-        os.environ["LOOKERSDK_CLIENT_ID"] = client_id.strip()
-    if client_secret:
-        os.environ["LOOKERSDK_CLIENT_SECRET"] = client_secret.strip()
-    return looker_sdk.init40()
-
-
-def list_looker_connections(
-    base_url: str,
-    client_id: str,
-    client_secret: str,
-) -> list[tuple[str, str, str]]:
-    """Return (name, dialect_label, database) for all configured Looker connections."""
-    sdk = _init_sdk(base_url, client_id, client_secret)
-    rows: list[tuple[str, str, str]] = []
-    for conn in sdk.all_connections():
-        name = (conn.name or "").strip()
-        if not name:
-            continue
-        dialect = ""
-        if conn.dialect and conn.dialect.label:
-            dialect = conn.dialect.label
-        elif conn.dialect_name:
-            dialect = conn.dialect_name
-        database = (conn.database or "").strip()
-        rows.append((name, dialect, database))
-    rows.sort(key=lambda r: r[0].lower())
-    return rows
-
-
-def _upsert_project_file(
-    sdk: Looker40SDK,
-    project_id: str,
-    existing_paths: set[str],
-    file_path: str,
-    content: str,
-) -> None:
-    enc_proj = sdk.encode_path_param(project_id)
-    api_path = f"/projects/{enc_proj}/files"
-    payload: dict[str, str] = {"path": file_path, "content": content}
-    if file_path in existing_paths:
-        sdk.put(path=api_path, structure=dict, body=payload)
-    else:
-        sdk.post(path=api_path, structure=dict, body=payload)
-        existing_paths.add(file_path)
 
 
 def _load_bundle_js(bundle_path: str | None = None) -> str | None:
@@ -131,119 +71,256 @@ def _load_bundle_js(bundle_path: str | None = None) -> str | None:
     return None
 
 
-def _secret_user_attribute_name(project_id: str) -> str:
-    prefix = re.sub(r"[^A-Za-z0-9]+", "_", project_id).strip("_").lower()
-    return f"{prefix}_{EXTENSION_APP_ID}_action_hub_secret"
+def _lkr_env(
+    base_url: str | None = None,
+    client_id: str | None = None,
+    client_secret: str | None = None,
+) -> dict[str, str]:
+    env = os.environ.copy()
+    if base_url:
+        env["LOOKERSDK_BASE_URL"] = base_url.strip().rstrip("/")
+    if client_id:
+        env["LOOKERSDK_CLIENT_ID"] = client_id.strip()
+    if client_secret:
+        env["LOOKERSDK_CLIENT_SECRET"] = client_secret.strip()
+    return env
 
 
-def deploy_extension_to_new_project(
-    sdk: Looker40SDK,
+def _lkr_cli_prefix(
+    *,
+    extras: str = "code-mode",
+    oauth_account: str | None = None,
+    dev: bool = True,
+) -> list[str]:
+    cmd = ["uvx", "--from", f"lkr-dev-cli[{extras}]", "lkr-dev-cli"]
+    if oauth_account:
+        cmd.append(f"--oauth-account={oauth_account.strip()}")
+    if dev:
+        cmd.append("--dev")
+    return cmd
+
+
+def _run_lkr_codemode(
+    *,
+    code: str | None = None,
+    file_path: Path | None = None,
+    variables: dict[str, str] | None = None,
+    base_url: str | None = None,
+    client_id: str | None = None,
+    client_secret: str | None = None,
+    oauth_account: str | None = None,
+    dev: bool = True,
+) -> object:
+    cmd = [
+        *_lkr_cli_prefix(extras="tools,code-mode", oauth_account=oauth_account, dev=dev),
+        "code-mode",
+        "sandbox",
+    ]
+    if code is not None:
+        cmd.extend(["--code", code])
+    elif file_path is not None:
+        cmd.extend(["--file", str(file_path)])
+    else:
+        raise ValueError("Either code or file_path is required.")
+
+    for key, val in (variables or {}).items():
+        cmd.extend(["--var", f"{key}={val}"])
+
+    proc = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        env=_lkr_env(base_url, client_id, client_secret),
+    )
+    stdout = proc.stdout.strip()
+    if proc.returncode != 0 or stdout.startswith("Error:"):
+        detail = stdout or proc.stderr.strip() or f"exit code {proc.returncode}"
+        raise RuntimeError(f"lkr-dev-cli code-mode failed: {detail}")
+    return json.loads(stdout) if stdout else {}
+
+
+def list_looker_connections(
+    base_url: str | None = None,
+    client_id: str | None = None,
+    client_secret: str | None = None,
+    *,
+    oauth_account: str | None = None,
+) -> list[tuple[str, str, str]]:
+    """Return (name, dialect_label, database) for all configured Looker connections."""
+    raw = _run_lkr_codemode(
+        code="return all_connections(fields='name,dialect,database')",
+        base_url=base_url,
+        client_id=client_id,
+        client_secret=client_secret,
+        oauth_account=oauth_account,
+        dev=False,
+    )
+    if not isinstance(raw, list):
+        return []
+    rows: list[tuple[str, str, str]] = []
+    for conn in raw:
+        if not isinstance(conn, dict):
+            continue
+        name = str(conn.get("name") or "").strip()
+        if not name:
+            continue
+        dialect_obj = conn.get("dialect")
+        dialect = ""
+        if isinstance(dialect_obj, dict) and dialect_obj.get("label"):
+            dialect = str(dialect_obj["label"])
+        elif conn.get("dialect_name"):
+            dialect = str(conn["dialect_name"])
+        database = str(conn.get("database") or "").strip()
+        rows.append((name, dialect, database))
+    rows.sort(key=lambda r: r[0].lower())
+    return rows
+
+
+def stage_lookml_project_dir(
+    target_dir: Path,
     *,
     service_url: str,
-    api_key_token: str,
     project_id: str,
     model_name: str,
     connection_name: str,
     bundle_path: str | None = None,
-) -> str:
-    """Create/configure a LookML project, upload bundle + manifest + model, and deploy."""
-    from looker_sdk import models40
-
-    print(f"Preparing LookML project '{project_id}' in dev workspace...")
-    sdk.update_session(body=models40.WriteApiSession(workspace_id="dev"))
-
-    try:
-        proj = sdk.project(project_id=project_id, fields="id,name,uses_git")
-    except Exception:
-        proj = sdk.create_project(body=models40.WriteProject(name=project_id))
-        print(f"Created LookML project '{project_id}'.")
-
-    if not proj.uses_git:
-        proj = sdk.update_project(
-            project_id=project_id,
-            body=models40.WriteProject(git_service_name="bare"),
-        )
-        print(f"Initialized bare Git repository on project '{project_id}'.")
-    else:
-        try:
-            sdk.reset_project_to_production(project_id=project_id)
-        except Exception:
-            pass
-
-    enc_proj = sdk.encode_path_param(project_id)
-    raw_files = cast(
-        list[dict[str, object]],
-        sdk.get(path=f"/projects/{enc_proj}/files", structure=list) or [],
-    )
-    existing_paths = {
-        str(f.get("path") or f.get("id") or "")
-        for f in raw_files
-        if isinstance(f, dict) and (f.get("path") or f.get("id"))
-    }
+    include_sample_lookml: bool = False,
+) -> bool:
+    """Populate target_dir with manifest.lkml, optional bundle.js, model, and sample LookML."""
+    target_dir.mkdir(parents=True, exist_ok=True)
 
     bundle_js = _load_bundle_js(bundle_path)
     use_local_bundle = bundle_js is not None
     if bundle_js is not None:
-        print(f"Uploading extension bundle.js ({len(bundle_js):,} chars) to '{project_id}'...")
-        _upsert_project_file(sdk, project_id, existing_paths, "bundle.js", bundle_js)
-    else:
-        print("Local/CDN bundle download unavailable; falling back to CDN url in manifest.lkml.")
+        (target_dir / "bundle.js").write_text(bundle_js, encoding="utf-8")
 
     manifest_content = (
         f'project_name: "{project_id}"\n\n'
         + build_manifest_application_block(service_url, use_local_bundle=use_local_bundle)
         + "\n"
     )
-    _upsert_project_file(sdk, project_id, existing_paths, "manifest.lkml", manifest_content)
+    (target_dir / "manifest.lkml").write_text(manifest_content, encoding="utf-8")
 
-    model_file_path = f"{model_name}.model.lkml"
-    if model_file_path not in existing_paths:
-        model_lkml = f'connection: "{connection_name}"\n'
-        _upsert_project_file(sdk, project_id, existing_paths, model_file_path, model_lkml)
+    models_dir = target_dir / "models"
+    models_dir.mkdir(exist_ok=True)
+    sample_root = REPO_ROOT / "assets" / "lookml"
+    sample_model = sample_root / "models" / "action_pptx.model.lkml"
 
-    print(f"Configuring LookML model '{model_name}' with connection '{connection_name}'...")
-    model_body = models40.WriteLookmlModel(
-        name=model_name,
-        project_name=project_id,
-        allowed_db_connection_names=[connection_name],
-    )
-    try:
-        sdk.lookml_model(lookml_model_name=model_name, fields="name")
-        sdk.update_lookml_model(lookml_model_name=model_name, body=model_body)
-    except Exception:
-        sdk.create_lookml_model(body=model_body)
-
-    enc_proj = sdk.encode_path_param(project_id)
-    sdk.post(
-        path=f"/projects/{enc_proj}/commit",
-        structure=str,
-        body={"message": "Deploy action-pptx Looker Extension"},
-    )
-    sdk.deploy_to_production(project_id=project_id)
-    print(f"Deployed LookML project '{project_id}' to production!")
-
-    secret_attr_name = _secret_user_attribute_name(project_id)
-    allowlist = build_secret_domain_allowlist(service_url)
-    existing_attr = next(
-        (a for a in sdk.all_user_attributes() if a.name == secret_attr_name and a.id),
-        None,
-    )
-    if existing_attr and existing_attr.id:
-        sdk.delete_user_attribute(user_attribute_id=existing_attr.id)
-    sdk.create_user_attribute(
-        body=models40.WriteUserAttribute(
-            name=secret_attr_name,
-            label=f"{project_id}::{EXTENSION_APP_ID} Action Hub Secret",
-            type="string",
-            value_is_hidden=True,
-            hidden_value_domain_whitelist=allowlist,
-            user_can_edit=False,
-            user_can_view=True,
-            default_value=api_key_token,
+    if include_sample_lookml and sample_model.is_file():
+        model_text = re.sub(
+            r'^\s*connection:\s*"[^"]*"',
+            lambda _m: f'connection: "{connection_name}"',
+            sample_model.read_text(encoding="utf-8"),
+            count=1,
+            flags=re.M,
         )
+        (models_dir / f"{model_name}.model.lkml").write_text(model_text, encoding="utf-8")
+
+        sample_view = sample_root / "views" / "inventory_items.view.lkml"
+        if sample_view.is_file():
+            views_dir = target_dir / "views"
+            views_dir.mkdir(exist_ok=True)
+            (views_dir / sample_view.name).write_text(
+                sample_view.read_text(encoding="utf-8"), encoding="utf-8"
+            )
+
+        sample_dash = sample_root / "dashboards" / "executive_business_review.dashboard.lookml"
+        if sample_dash.is_file():
+            dash_dir = target_dir / "dashboards"
+            dash_dir.mkdir(exist_ok=True)
+            dash_text = re.sub(
+                r"^(\s*model:\s*)\S+",
+                lambda m: f"{m.group(1)}{model_name}",
+                sample_dash.read_text(encoding="utf-8"),
+                flags=re.M,
+            )
+            (dash_dir / sample_dash.name).write_text(dash_text, encoding="utf-8")
+    else:
+        (models_dir / f"{model_name}.model.lkml").write_text(
+            f'connection: "{connection_name}"\n',
+            encoding="utf-8",
+        )
+
+    return use_local_bundle
+
+
+def deploy_extension_to_new_project(
+    *,
+    service_url: str,
+    templates_gcs_uri: str = "",
+    output_gcs_uri: str = "",
+    project_id: str,
+    model_name: str,
+    connection_name: str,
+    bundle_path: str | None = None,
+    include_sample_lookml: bool = False,
+    oauth_client_id: str | None = None,
+    oauth_gcs_passthrough: bool = False,
+    base_url: str | None = None,
+    client_id: str | None = None,
+    client_secret: str | None = None,
+    oauth_account: str | None = None,
+) -> str:
+    """Stage LookML project + bundle.js and push/deploy via lkr-dev-cli tools lookml push."""
+    with tempfile.TemporaryDirectory(prefix="action-pptx-lookml-") as tmp:
+        stage_dir = Path(tmp) / project_id
+        use_local_bundle = stage_lookml_project_dir(
+            stage_dir,
+            service_url=service_url,
+            project_id=project_id,
+            model_name=model_name,
+            connection_name=connection_name,
+            bundle_path=bundle_path,
+            include_sample_lookml=include_sample_lookml,
+        )
+        bundle_msg = "local bundle.js" if use_local_bundle else "CDN bundle URL"
+        sample_msg = " + sample LookML/dashboard" if include_sample_lookml else ""
+        print(
+            f"Pushing LookML project '{project_id}' ({bundle_msg}{sample_msg}) "
+            "and deploying to production via lkr-dev-cli..."
+        )
+        cmd = [
+            *_lkr_cli_prefix(extras="tools,code-mode", oauth_account=oauth_account, dev=True),
+            "tools",
+            "lookml",
+            "push",
+            str(stage_dir),
+            f"--project-id={project_id}",
+            "--create-project",
+            "--deploy",
+            "--message=Deploy action-pptx Looker Extension",
+        ]
+        subprocess.run(
+            cmd,
+            check=True,
+            env=_lkr_env(base_url, client_id, client_secret),
+        )
+
+    extension_id = f"{project_id}::{EXTENSION_APP_ID}"
+    print(f"Configuring Extension context for '{extension_id}' via update_data_app...")
+    cfg_res = _run_lkr_codemode(
+        file_path=CODEMODE_SCRIPT,
+        variables={
+            "action": "configure_extension",
+            "service_url": normalize_service_base(service_url),
+            "templates_gcs_uri": templates_gcs_uri,
+            "output_gcs_uri": output_gcs_uri,
+            "project_id": project_id,
+            "oauth_client_id": (oauth_client_id or "").strip(),
+            "oauth_gcs_passthrough": "true" if oauth_gcs_passthrough else "false",
+        },
+        base_url=base_url,
+        client_id=client_id,
+        client_secret=client_secret,
+        oauth_account=oauth_account,
+        dev=True,
     )
-    print(f"Configured hidden secret user attribute '{secret_attr_name}' (allowlist: {allowlist}).")
-    return f"{project_id}::{EXTENSION_APP_ID}"
+    if isinstance(cfg_res, dict):
+        if cfg_res.get("configured"):
+            print(f"Extension context updated for {extension_id}!")
+        elif cfg_res.get("reason"):
+            print(f"Note: Could not auto-configure {extension_id}: {cfg_res['reason']}")
+    return extension_id
 
 
 def register_action_hub_and_extension(
@@ -258,13 +335,14 @@ def register_action_hub_and_extension(
     model_name: str = "action_pptx_extension",
     connection_name: str = "",
     bundle_path: str | None = None,
+    include_sample_lookml: bool = False,
+    oauth_client_id: str | None = None,
+    oauth_gcs_passthrough: bool = False,
     base_url: str | None = None,
     client_id: str | None = None,
     client_secret: str | None = None,
+    oauth_account: str | None = None,
 ) -> str | None:
-    from looker_sdk import models40
-
-    sdk = _init_sdk(base_url, client_id, client_secret)
     token = api_key_token
     if "/" not in token:
         nonce = secrets.token_bytes(32).hex()
@@ -272,68 +350,43 @@ def register_action_hub_and_extension(
         token = f"{nonce}/{digest}"
 
     url = normalize_service_base(service_url)
-    print(f"Registering Integration Hub {url} in Looker...")
-    body = models40.WriteIntegrationHub(url=url, authorization_token=token)
-    try:
-        hub = sdk.create_integration_hub(body=body)
-        print(f"Successfully registered Integration Hub (ID: {hub.id})")
-    except Exception as exc:
-        existing = next(
-            (h for h in sdk.all_integration_hubs() if h.url and h.url.rstrip("/") == url and h.id),
-            None,
-        )
-        if not existing or not existing.id:
-            raise RuntimeError(f"Failed to find or create the Integration Hub: {exc}") from exc
-        hub = sdk.update_integration_hub(integration_hub_id=existing.id, body=body)
-        print(f"Updated existing Integration Hub (ID: {hub.id})")
-
-    if hub.id and hub.legal_agreement_required and not hub.legal_agreement_signed:
-        hub = sdk.accept_integration_hub_legal_agreement(integration_hub_id=hub.id)
-
-    print("Enabling action-pptx integration...")
-    integration = None
-    for attempt in range(6):
+    print(f"Registering Integration Hub {url} via lkr-dev-cli code-mode...")
+    res: object = {}
+    for attempt in range(3):
         try:
-            integration = sdk.integration(integration_id=f"{hub.id}::action-pptx")
+            res = _run_lkr_codemode(
+                file_path=CODEMODE_SCRIPT,
+                variables={
+                    "action": "setup_hub",
+                    "service_url": url,
+                    "api_key_token": token,
+                    "templates_gcs_uri": templates_gcs_uri,
+                    "output_gcs_uri": output_gcs_uri,
+                    "required_user_attribute": required_user_attribute,
+                    "extension_mode": extension_mode,
+                    "project_id": project_id,
+                },
+                base_url=base_url,
+                client_id=client_id,
+                client_secret=client_secret,
+                oauth_account=oauth_account,
+                dev=True,
+            )
             break
-        except Exception:
-            if attempt == 5:
-                break
-            print(f"Integration not found on hub {hub.id} yet; retrying in 3s ({attempt + 1}/6)...")
+        except RuntimeError as exc:
+            if "Could not find action-pptx integration" not in str(exc) or attempt == 2:
+                raise
             time.sleep(3)
-
-    if not integration or not integration.id:
-        raise RuntimeError("Could not find action-pptx integration on the registered hub.")
-
-    params = [
-        models40.WriteIntegrationParam(name=k, value=v)
-        for k, v in (
-            ("templates_gcs_uri", templates_gcs_uri),
-            ("output_gcs_uri", output_gcs_uri),
+    if isinstance(res, dict):
+        print(
+            f"Integration Hub {res.get('hub_action', 'configured')} "
+            f"(ID: {res.get('hub_id')}), enabled {res.get('integration_id')}!"
         )
-        if v
-    ]
-    req_attr = required_user_attribute.strip()
-    if req_attr:
-        has_attr = any(a.name == req_attr for a in sdk.all_user_attributes())
-        if has_attr:
-            params.append(
-                models40.WriteIntegrationParam(
-                    name="action_access_param",
-                    user_attribute_name=req_attr,
-                )
-            )
-        else:
+        if required_user_attribute.strip() and not res.get("bound_user_attribute"):
             print(
-                f"Note: User attribute '{req_attr}' does not exist yet in Looker; "
-                "create it under Admin -> User Attributes and bind it on the action."
+                f"Note: User attribute '{required_user_attribute.strip()}' does not exist yet in "
+                "Looker; create it under Admin -> User Attributes and bind it on the action."
             )
-
-    sdk.update_integration(
-        integration_id=integration.id,
-        body=models40.WriteIntegration(enabled=True, params=params or None),
-    )
-    print("Successfully enabled and configured action-pptx integration!")
 
     if extension_mode == "new":
         if not connection_name:
@@ -341,13 +394,20 @@ def register_action_hub_and_extension(
                 "A Looker database connection name is required to deploy a new Extension project."
             )
         return deploy_extension_to_new_project(
-            sdk,
             service_url=url,
-            api_key_token=token,
+            templates_gcs_uri=templates_gcs_uri,
+            output_gcs_uri=output_gcs_uri,
             project_id=project_id,
             model_name=model_name,
             connection_name=connection_name,
             bundle_path=bundle_path,
+            include_sample_lookml=include_sample_lookml,
+            oauth_client_id=oauth_client_id,
+            oauth_gcs_passthrough=oauth_gcs_passthrough,
+            base_url=base_url,
+            client_id=client_id,
+            client_secret=client_secret,
+            oauth_account=oauth_account,
         )
     return None
 
@@ -357,6 +417,14 @@ def main() -> None:
     token = os.environ.get("API_KEY_TOKEN", "")
     if not url or not token:
         raise RuntimeError("SERVICE_URL and API_KEY_TOKEN environment variables are required.")
+
+    oauth_client_id = os.environ.get("OAUTH_CLIENT_ID") or None
+    oauth_passthrough_raw = os.environ.get("OAUTH_GCS_PASSTHROUGH", "").lower()
+    oauth_gcs_passthrough = (
+        oauth_passthrough_raw in ("1", "true", "yes")
+        if oauth_passthrough_raw
+        else bool(oauth_client_id)
+    )
 
     register_action_hub_and_extension(
         service_url=url,
@@ -369,6 +437,11 @@ def main() -> None:
         model_name=os.environ.get("LOOKER_MODEL_NAME", "action_pptx_extension"),
         connection_name=os.environ.get("LOOKER_CONNECTION_NAME", ""),
         bundle_path=os.environ.get("EXTENSION_BUNDLE_PATH") or None,
+        include_sample_lookml=os.environ.get("INCLUDE_SAMPLE_LOOKML", "").lower()
+        in ("1", "true", "yes"),
+        oauth_client_id=oauth_client_id,
+        oauth_gcs_passthrough=oauth_gcs_passthrough,
+        oauth_account=os.environ.get("LOOKER_OAUTH_ACCOUNT") or None,
     )
 
 
