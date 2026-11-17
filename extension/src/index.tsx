@@ -289,8 +289,9 @@ function createMockHarness(apiBase: string, secret: string, unconfigured: boolea
       const qIdx = target.indexOf("?");
       const pathPart = qIdx >= 0 ? target.slice(0, qIdx) : target;
       const merged = new URLSearchParams(window.location.search);
-      merged.delete("filename");
-      merged.delete("mode");
+      for (const k of ["filename", "mode", "q", "user_id"]) {
+        merged.delete(k);
+      }
       if (qIdx >= 0) {
         for (const [k, v] of new URLSearchParams(target.slice(qIdx + 1))) merged.set(k, v);
       }
@@ -319,6 +320,15 @@ function createMockHarness(apiBase: string, secret: string, unconfigured: boolea
       });
       return { status: resp.status, body: await resp.json() };
     },
+  };
+
+  const artifactsStore = new Map<string, Record<string, any>>();
+  const plansStore = new Map<string, Record<string, any>>();
+  let nextPlanId = 500;
+
+  const sqlLikeToRegex = (pattern: string): RegExp => {
+    const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+    return new RegExp("^" + escaped.replace(/%/g, ".*").replace(/_/g, ".") + "$");
   };
 
   const core40SDK = {
@@ -369,13 +379,43 @@ function createMockHarness(apiBase: string, secret: string, unconfigured: boolea
       },
     ],
     dashboard: async (id: string) => {
-      const isEmbedDemo = id.includes("embed_demo") || id.includes("brand_overview");
+      const isEmbedDemo =
+        id === "155" || id.includes("embed_demo") || id.includes("brand_overview");
       const defs = isEmbedDemo ? EMBED_DEMO_TILE_DEFS : EBR_TILE_DEFS;
       return {
         id,
         title: isEmbedDemo
           ? "Brand Overview (Looker Embed Demo)"
           : "Executive Business Review",
+        dashboard_filters: isEmbedDemo
+          ? [
+              {
+                name: "Brand",
+                title: "Brand",
+                model: "embed_demo",
+                explore: "order_items",
+                dimension: "products.brand",
+                default_value: "",
+              },
+              {
+                name: "Country",
+                title: "Country",
+                model: "embed_demo",
+                explore: "order_items",
+                dimension: "users.country",
+                default_value: "USA",
+              },
+            ]
+          : [
+              {
+                name: "Region",
+                title: "Region",
+                model: "action_pptx",
+                explore: "inventory_items",
+                dimension: "inventory_items.region",
+                default_value: "",
+              },
+            ],
         dashboard_elements: defs.map((t) => ({
           title: t.title,
           query_id: t.id,
@@ -391,10 +431,22 @@ function createMockHarness(apiBase: string, secret: string, unconfigured: boolea
     },
     lookml_model_explore: async () => ({
       fields: {
-        dimensions: ALL_MOCK_TILES.flatMap((t) =>
-          t.fields.map((f) => ({ name: f, label: f, label_short: f }))
-        ),
-        measures: [],
+        dimensions: [
+          { name: "products.brand", label: "Products Brand", label_short: "Brand" },
+          { name: "users.country", label: "Users Country", label_short: "Country" },
+          { name: "inventory_items.region", label: "Region", label_short: "Region" },
+          ...ALL_MOCK_TILES.flatMap((t) =>
+            t.fields.map((f) => ({ name: f, label: f, label_short: f }))
+          ),
+        ],
+        measures: [
+          {
+            name: "order_items.total_sale_price",
+            label: "Order Items Total Sale Price",
+            label_short: "Total Sale Price",
+          },
+          { name: "order_items.count", label: "Order Items Count", label_short: "Orders" },
+        ],
         filters: [],
         parameters: [],
       },
@@ -403,9 +455,44 @@ function createMockHarness(apiBase: string, secret: string, unconfigured: boolea
       const found = ALL_MOCK_TILES.find((t) => t.id === query_id);
       return found ? found.csv : "";
     },
+    run_inline_query: async ({ body }: { body: Record<string, any> }) => {
+      const dim = String((body?.fields || [])[0] || "products.brand");
+      const sampleValues = dim.includes("region")
+        ? [
+            { [dim]: "North America", "order_items.total_sale_price": 745000 },
+            { [dim]: "EMEA", "order_items.total_sale_price": 890000 },
+            { [dim]: "APAC", "order_items.total_sale_price": 988000 },
+            { [dim]: "LATAM", "order_items.total_sale_price": 412000 },
+          ]
+        : [
+            { [dim]: "Levi's", "order_items.total_sale_price": 1542800 },
+            { [dim]: "Calvin Klein", "order_items.total_sale_price": 984200 },
+            { [dim]: "Carhartt", "order_items.total_sale_price": 842100 },
+            { [dim]: "Tommy Hilfiger", "order_items.total_sale_price": 712400 },
+            { [dim]: "Columbia", "order_items.total_sale_price": 654900 },
+          ];
+      const filterExpr = String(body?.filters?.[dim] || "").replace(/%/g, "").trim().toLowerCase();
+      const filtered = filterExpr
+        ? sampleValues.filter((r) => String(r[dim]).toLowerCase().includes(filterExpr))
+        : sampleValues.slice();
+      const sortSpec = String((body?.sorts || [])[0] || `${dim} asc`);
+      const [sortField, dirRaw] = sortSpec.split(/\s+/);
+      const desc = dirRaw?.toLowerCase() === "desc";
+      filtered.sort((a: any, b: any) => {
+        const av = a[sortField] ?? a[dim];
+        const bv = b[sortField] ?? b[dim];
+        const cmp =
+          typeof av === "number" && typeof bv === "number"
+            ? av - bv
+            : String(av).localeCompare(String(bv));
+        return desc ? -cmp : cmp;
+      });
+      return filtered.slice(0, Number(body?.limit) || 500);
+    },
     all_integrations: async () => [
       {
         id: "28::action-pptx",
+        enabled: true,
         label: "PowerPoint Template Merge (action-pptx)",
         url: `${apiBase}/actions/pptx/execute`,
         uses_oauth: true,
@@ -422,6 +509,97 @@ function createMockHarness(apiBase: string, secret: string, unconfigured: boolea
         ],
       },
     ],
+    artifact: async ({ namespace, key }: { namespace: string; key: string }) => {
+      const hit = artifactsStore.get(`${namespace}::${key}`);
+      return hit ? [hit] : [];
+    },
+    search_artifacts: async ({ namespace, key }: { namespace: string; key?: string }) => {
+      const rx = key ? sqlLikeToRegex(key) : null;
+      const out: Record<string, any>[] = [];
+      for (const item of artifactsStore.values()) {
+        if (item.namespace !== namespace) continue;
+        if (rx && !rx.test(item.key)) continue;
+        out.push(item);
+      }
+      return out;
+    },
+    update_artifacts: async (namespace: string, body: Array<Record<string, any>>) => {
+      const saved: Record<string, any>[] = [];
+      for (const item of body || []) {
+        const k = `${namespace}::${item.key}`;
+        const prev = artifactsStore.get(k);
+        if (prev && item.version !== prev.version) {
+          throw new Error(`Artifact version conflict for ${item.key}`);
+        }
+        const next = {
+          namespace,
+          key: item.key,
+          value: item.value,
+          content_type: item.content_type || "application/json",
+          version: prev ? prev.version + 1 : 1,
+          updated_at: new Date().toISOString(),
+        };
+        artifactsStore.set(k, next);
+        saved.push(next);
+      }
+      return saved;
+    },
+    delete_artifact: async (namespace: string, key: string) => {
+      artifactsStore.delete(`${namespace}::${key}`);
+    },
+    search_scheduled_plans: async (req: Record<string, any>) => {
+      const out: Record<string, any>[] = [];
+      for (const p of plansStore.values()) {
+        if (req?.user_id && String(p.user_id) !== String(req.user_id)) continue;
+        if (!req?.all_states && p.enabled === false) continue;
+        if (req?.dashboard_id && String(p.dashboard_id || "") !== String(req.dashboard_id)) {
+          continue;
+        }
+        if (
+          req?.lookml_dashboard_id &&
+          String(p.lookml_dashboard_id || "") !== String(req.lookml_dashboard_id)
+        ) {
+          continue;
+        }
+        if (req?.destination_type) {
+          const dests = Array.isArray(p.scheduled_plan_destination)
+            ? p.scheduled_plan_destination
+            : [];
+          if (!dests.some((d: any) => d?.type === req.destination_type)) continue;
+        }
+        out.push(p);
+      }
+      return out;
+    },
+    create_scheduled_plan: async (body: Record<string, any>) => {
+      const id = String(++nextPlanId);
+      const created = {
+        ...body,
+        id,
+        user_id: String(body.user_id || "21"),
+        next_run_at: new Date(Date.now() + 86400_000).toISOString(),
+      };
+      plansStore.set(id, created);
+      return created;
+    },
+    update_scheduled_plan: async (id: string, body: Record<string, any>) => {
+      const prev = plansStore.get(String(id));
+      if (!prev) throw new Error(`ScheduledPlan ${id} not found`);
+      const next = { ...prev, ...body, id: String(id) };
+      plansStore.set(String(id), next);
+      return next;
+    },
+    delete_scheduled_plan: async (id: string) => {
+      plansStore.delete(String(id));
+      return "";
+    },
+    scheduled_plan_run_once_by_id: async (id: string) => {
+      const prev = plansStore.get(String(id));
+      if (!prev) throw new Error(`ScheduledPlan ${id} not found`);
+      const next = { ...prev, last_run_at: new Date().toISOString() };
+      plansStore.set(String(id), next);
+      return next;
+    },
     all_user_attributes: async () => [],
     delete_user_attribute: async () => "",
     create_user_attribute: async () => ({}),

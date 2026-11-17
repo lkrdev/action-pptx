@@ -17,6 +17,7 @@ import {
   fetchDashboardTileCsvs,
   fetchDashboardTileSchemas,
 } from "./dashboardSchema";
+import { SchedulerSeed, SchedulerView } from "./SchedulerView";
 
 interface AppProps {
   core40SDK: any;
@@ -32,26 +33,35 @@ function parseExtensionRoute(raw?: string, fallbackSearch = "") {
   const qIdx = trimmed.indexOf("?");
   const cleaned = (qIdx >= 0 ? trimmed.slice(0, qIdx) : trimmed).replace(/\/+$/, "");
   const params = new URLSearchParams(qIdx >= 0 ? trimmed.slice(qIdx + 1) : fallbackSearch);
-  const path: "/" | "/viewer" | "/config" =
+  const path: "/" | "/viewer" | "/scheduler" | "/config" =
     cleaned === "config" || cleaned.endsWith("/config")
       ? "/config"
       : cleaned === "viewer" || cleaned.endsWith("/viewer")
         ? "/viewer"
-        : "/";
+        : cleaned === "scheduler" || cleaned.endsWith("/scheduler")
+          ? "/scheduler"
+          : "/";
   const mode = params.get("mode");
   return {
     path,
     filename: (params.get("filename") || "").trim(),
     mode: mode === "templates" || mode === "outputs" ? (mode as ViewerMode) : undefined,
+    q: (params.get("q") || "").trim(),
+    userId: (params.get("user_id") || "").trim(),
   };
 }
 
-function buildViewerClientRoute(filename: string, mode: ViewerMode): string {
+function buildViewerClientRoute(filename: string, mode: ViewerMode, query = ""): string {
   const params = new URLSearchParams();
   if (mode === "templates") params.set("mode", "templates");
   if (filename) params.set("filename", filename);
+  if (query.trim()) params.set("q", query.trim());
   const qs = params.toString();
   return qs ? `/viewer?${qs}` : "/viewer";
+}
+
+function buildSchedulerClientRoute(userId = ""): string {
+  return userId.trim() ? `/scheduler?user_id=${encodeURIComponent(userId.trim())}` : "/scheduler";
 }
 
 export const OAUTH_STORAGE_KEY = "action_pptx_oauth_session";
@@ -431,6 +441,7 @@ export const App: React.FC<AppProps> = ({
       cloudRunUrl: ctx?.cloudRunUrl || "",
       templatesGcsUri: ctx?.templatesGcsUri || "",
       outputGcsUri: ctx?.outputGcsUri || "",
+      actionIntegrationId: ctx?.actionIntegrationId,
       templatesUserAttributeName: ctx?.templatesUserAttributeName,
       useOAuth: Boolean(ctx?.useOAuth),
       oauthClientId: ctx?.oauthClientId,
@@ -442,7 +453,9 @@ export const App: React.FC<AppProps> = ({
   const [requestedViewerFile, setRequestedViewerFile] = useState<string>(initialParsed.filename);
   const [viewerSourceUri, setViewerSourceUri] = useState<string>("");
   const [viewerFiles, setViewerFiles] = useState<OutputReportItem[]>([]);
-  const [viewerSearch, setViewerSearch] = useState<string>("");
+  const [viewerSearch, setViewerSearch] = useState<string>(initialParsed.q);
+  const [schedulerUserId, setSchedulerUserId] = useState<string>(initialParsed.userId);
+  const [schedulerSeed, setSchedulerSeed] = useState<SchedulerSeed | null>(null);
   const [viewerSortKey, setViewerSortKey] = useState<"name" | "size" | "updated">("updated");
   const [viewerSortAsc, setViewerSortAsc] = useState<boolean>(false);
   const [viewerLoadingList, setViewerLoadingList] = useState<boolean>(false);
@@ -504,12 +517,17 @@ export const App: React.FC<AppProps> = ({
 
   function navigateTo(raw?: string, fallbackSearch = "") {
     const parsed = parseExtensionRoute(raw, fallbackSearch);
+    const hasExplicitQuery = Boolean((raw && raw.includes("?")) || fallbackSearch);
     setActionError("");
     setRoute(parsed.path);
     if (parsed.mode) {
       setViewerMode(parsed.mode);
     }
     if (parsed.path === "/viewer") {
+      if (hasExplicitQuery) {
+        setViewerSearch(parsed.q);
+        if (!parsed.mode && parsed.q) setViewerMode("outputs");
+      }
       setRequestedViewerFile(parsed.filename);
       if (!parsed.filename) {
         viewerLoadSeqRef.current += 1;
@@ -517,6 +535,8 @@ export const App: React.FC<AppProps> = ({
         setViewerPptxBase64("");
         setViewerFileName("");
       }
+    } else if (parsed.path === "/scheduler" && hasExplicitQuery) {
+      setSchedulerUserId(parsed.userId);
     }
   }
 
@@ -1088,8 +1108,10 @@ export const App: React.FC<AppProps> = ({
   const effectiveRoute = !isConfigured ? "/config" : route;
   const effectiveClientRoute =
     effectiveRoute === "/viewer"
-      ? buildViewerClientRoute(viewerFileName || requestedViewerFile, viewerMode)
-      : effectiveRoute;
+      ? buildViewerClientRoute(viewerFileName || requestedViewerFile, viewerMode, viewerSearch)
+      : effectiveRoute === "/scheduler"
+        ? buildSchedulerClientRoute(schedulerUserId)
+        : effectiveRoute;
 
   useEffect(() => {
     try {
@@ -1208,6 +1230,7 @@ export const App: React.FC<AppProps> = ({
 
   const selectedDashTitle = selectedDashboardTitle || "Open Dashboard";
   const isViewerRoute = effectiveRoute === "/viewer";
+  const isSchedulerRoute = effectiveRoute === "/scheduler";
   const hasErrors = Boolean(actionError) || Boolean(report && !report.valid);
   const isCheckPassed = Boolean(report?.valid) && !actionError;
   const showStatusIcon = hasErrors || isCheckPassed;
@@ -1441,12 +1464,18 @@ export const App: React.FC<AppProps> = ({
             <ActionPptxDeckLogo size={34} />
             <div style={{ minWidth: 0 }}>
               <h1 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: ui.textPrimary }}>
-                {isViewerRoute ? "PowerPoint Report Viewer" : "PowerPoint Report Builder"}
+                {isViewerRoute
+                  ? "PowerPoint Report Viewer"
+                  : isSchedulerRoute
+                    ? "PowerPoint Master Scheduler"
+                    : "PowerPoint Report Builder"}
               </h1>
               <p style={{ margin: "2px 0 0", fontSize: 12, color: ui.textMuted }}>
                 {isViewerRoute
                   ? "Browse and inspect rendered PowerPoint reports and saved templates."
-                  : "Preview your PowerPoint template with live Looker dashboard data or save it to your shared library."}
+                  : isSchedulerRoute
+                    ? "Fan out one PowerPoint template across N dashboard filter slices on a shared Looker schedule."
+                    : "Preview your PowerPoint template with live Looker dashboard data or save it to your shared library."}
               </p>
             </div>
           </div>
@@ -1460,30 +1489,65 @@ export const App: React.FC<AppProps> = ({
               marginLeft: "auto",
             }}
           >
-            {(isViewerRoute || canOpenViewer) && (
-              <button
-                id={isViewerRoute ? "btn-switch-builder" : "btn-switch-viewer"}
-                type="button"
-                onClick={() => navigateTo(isViewerRoute ? "/" : "/viewer")}
-                style={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  background: ui.cardBg,
-                  color: ui.accent,
-                  border: `1px solid ${ui.accent}`,
-                  borderRadius: 6,
-                  padding: "5px 10px",
-                  fontSize: 12,
-                  fontWeight: 700,
-                  cursor: "pointer",
-                  whiteSpace: "nowrap",
-                }}
-              >
-                {isViewerRoute ? "Switch to Builder" : "Switch to Viewer"}
-              </button>
-            )}
+            <div
+              role="navigation"
+              aria-label="Extension views"
+              style={{
+                display: "inline-flex",
+                background: ui.inputBg,
+                border: `1px solid ${ui.border}`,
+                borderRadius: 7,
+                padding: 2,
+                gap: 2,
+              }}
+            >
+              {(
+                [
+                  { id: "btn-nav-builder", path: "/", label: "Builder", show: true },
+                  {
+                    id: "btn-nav-viewer",
+                    path: "/viewer",
+                    label: "Viewer",
+                    show: canOpenViewer || isViewerRoute,
+                  },
+                  { id: "btn-nav-scheduler", path: "/scheduler", label: "Scheduler", show: true },
+                ] as const
+              )
+                .filter((item) => item.show)
+                .map((item) => {
+                  const active = effectiveRoute === item.path;
+                  return (
+                    <button
+                      key={item.path}
+                      id={item.id}
+                      type="button"
+                      aria-current={active ? "page" : undefined}
+                      onClick={() =>
+                        navigateTo(
+                          item.path === "/scheduler"
+                            ? buildSchedulerClientRoute(schedulerUserId)
+                            : item.path
+                        )
+                      }
+                      style={{
+                        border: "none",
+                        borderRadius: 5,
+                        padding: "5px 10px",
+                        fontSize: 12,
+                        fontWeight: 700,
+                        cursor: "pointer",
+                        whiteSpace: "nowrap",
+                        background: active ? ui.accent : "transparent",
+                        color: active ? ui.accentContrast : ui.textSecondary,
+                      }}
+                    >
+                      {item.label}
+                    </button>
+                  );
+                })}
+            </div>
 
-            {!isViewerRoute && (
+            {!isViewerRoute && !isSchedulerRoute && (
               <LookerThemePicker
                 themes={lookerThemes}
                 selectedThemeName={selectedThemeName}
@@ -1934,6 +1998,24 @@ export const App: React.FC<AppProps> = ({
               )}
             </div>
           )
+        ) : isSchedulerRoute ? (
+          <SchedulerView
+            core40SDK={core40SDK}
+            extensionSDK={extensionSDK}
+            ui={ui}
+            isDark={isDark}
+            lookerThemes={lookerThemes}
+            actionIntegrationId={config.actionIntegrationId}
+            targetUserIdOverride={schedulerUserId || undefined}
+            seed={schedulerSeed}
+            onClearSeed={() => setSchedulerSeed(null)}
+            callCloudRun={callCloudRun}
+            resolveTemplatesGcsUri={resolveTemplatesGcsUri}
+            canOpenViewer={canOpenViewer}
+            onOpenViewerSearch={(query) => {
+              navigateTo(`/viewer?q=${encodeURIComponent(query)}`);
+            }}
+          />
         ) : (
           <>
 
@@ -2441,6 +2523,38 @@ export const App: React.FC<AppProps> = ({
                 <IconUpload />
                 <span>Save to Template Library</span>
               </button>
+
+              {(savedNotice || (fileName && report?.valid)) && (
+                <button
+                  id="btn-schedule-template"
+                  type="button"
+                  onClick={() => {
+                    setSchedulerSeed({
+                      dashboardId: selectedDashboardId || undefined,
+                      dashboardTitle: selectedDashboardTitle || undefined,
+                      templateName: fileName || undefined,
+                      themeName: selectedThemeName || undefined,
+                    });
+                    navigateTo(buildSchedulerClientRoute(schedulerUserId));
+                  }}
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 5,
+                    background: ui.inputBg,
+                    color: ui.accent,
+                    border: `1px solid ${ui.accent}`,
+                    borderRadius: 6,
+                    padding: "6px 11px",
+                    fontSize: 12,
+                    fontWeight: 700,
+                    whiteSpace: "nowrap",
+                    cursor: "pointer",
+                  }}
+                >
+                  <span>Schedule Template →</span>
+                </button>
+              )}
 
               {isPreviewOpen && (
                 <button

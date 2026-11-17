@@ -195,7 +195,16 @@ application: action_pptx_template_manager {
       "create_user_attribute",
       "delete_user_attribute",
       "all_themes",
-      "all_color_collections"
+      "all_color_collections",
+      "search_scheduled_plans",
+      "create_scheduled_plan",
+      "update_scheduled_plan",
+      "delete_scheduled_plan",
+      "scheduled_plan_run_once_by_id",
+      "artifact",
+      "search_artifacts",
+      "update_artifacts",
+      "delete_artifact"
     ]
     global_user_attributes: ["brand"]
     external_api_urls: [
@@ -218,7 +227,11 @@ application: action_pptx_template_manager {
 1. As a Looker Admin, open the Extension and navigate to `/config` once:
    - Click **Auto-Discover from Action Hub** to pre-fill the Cloud Run URL and `templates_gcs_uri` from the registered `action-pptx` integration.
    - Enter the Action Hub secret to store it in the hidden `action_hub_secret` scoped user attribute (used by `extensionSDK.serverProxy`), or enable **Google OAuth Mode** if running on a strict RFC1918 Private IP Local FQDN Looker instance.
-2. To build the extension bundle locally from source (`extension/dist/bundle.js`):
+2. Switch between the three built-in views from the header navigation bar:
+   - **Builder (`/`)** — Validate `.pptx` bindings against live Looker dashboards, preview themed decks, and upload templates to GCS.
+   - **Viewer (`/viewer`)** — Browse, search (`?q=<subpath>`), preview, and download rendered `.pptx` outputs and saved templates.
+   - **Scheduler (`/scheduler`)** — Manage **Master Fanout Schedules** (1 dashboard + 1 template + 1 cadence → *N* Looker `ScheduledPlan` filter slices writing to `{output_folder}/{slice_slug}_<timestamp>.pptx`, backed by Looker Artifacts and reconciled via `search_scheduled_plans`). Looker Admins with `see_schedules` can inspect or manage another user's Master Fanout schedules one user at a time by appending `?user_id=<looker_user_id>` (e.g. `/scheduler?user_id=42`).
+3. To build the extension bundle locally from source (`extension/dist/bundle.js`):
 
 ```bash
 cd extension
