@@ -2,7 +2,6 @@
 # /// script
 # requires-python = ">=3.14"
 # dependencies = [
-#     "looker-sdk>=24.0.0",
 #     "typer>=0.9.0",
 #     "rich>=13.0.0",
 #     "questionary>=2.0.0",
@@ -96,11 +95,11 @@ def run_cmd_with_retry(
     sys.exit(1)
 
 
-def _maybe_build_extension_bundle(repo_root: Path, from_source: bool) -> str | None:
+def _maybe_build_extension_bundle(repo_root: Path) -> str | None:
     ext_dir = repo_root / "extension"
     dist_bundle = ext_dir / "dist" / "bundle.js"
-    if from_source and (ext_dir / "package.json").is_file() and shutil.which("npm"):
-        console.print("[bold cyan]Building Looker Extension bundle from source...[/bold cyan]")
+    if (ext_dir / "package.json").is_file() and shutil.which("npm"):
+        console.print("[bold cyan]Building Looker Extension bundle via webpack...[/bold cyan]")
         if not (ext_dir / "node_modules").is_dir():
             run_cmd(["npm", "ci", "--no-audit", "--no-fund"], cwd=ext_dir)
         run_cmd(["npm", "run", "build"], cwd=ext_dir)
@@ -137,6 +136,11 @@ def main(
     looker_client_secret: str | None = typer.Option(
         None, "--looker-client-secret", help="Looker Client Secret"
     ),
+    looker_oauth_account: str | None = typer.Option(
+        None,
+        "--looker-oauth-account",
+        help="Configured lkr-dev-cli OAuth account name (alternative to client ID/secret)",
+    ),
     extension_mode: str | None = typer.Option(
         None,
         "--extension-mode",
@@ -159,6 +163,13 @@ def main(
         None,
         "--looker-connection",
         help="Looker database connection name to attach to the new project's model",
+    ),
+    include_sample_lookml: bool | None = typer.Option(
+        None,
+        "--include-sample-lookml/--no-include-sample-lookml",
+        help=(
+            "Include sample LookML view and Executive Business Review dashboard from assets/lookml"
+        ),
     ),
     oauth_client_id: str | None = typer.Option(
         None,
@@ -253,22 +264,26 @@ def main(
 
     resolved_ext_mode = (extension_mode or "").strip().lower()
     if register_looker:
-        console.print("\n[bold yellow]Note:[/bold yellow] Looker API credentials are not stored.")
-        looker_url = (
-            looker_url
-            or questionary.text(
-                "Enter Looker Base URL (e.g. https://yourcompany.cloud.looker.com):"
-            ).ask()
-        )
-        looker_client_id = looker_client_id or questionary.text("Enter Looker Client ID:").ask()
-        looker_client_secret = (
-            looker_client_secret or questionary.password("Enter Looker Client Secret:").ask()
-        )
-        if not looker_url or not looker_client_id or not looker_client_secret:
+        if not looker_oauth_account:
             console.print(
-                "[bold red]Error: Looker URL, Client ID, and Client Secret are required.[/bold red]"
+                "\n[bold yellow]Note:[/bold yellow] Looker API credentials are not stored."
             )
-            raise typer.Exit(1)
+            looker_url = (
+                looker_url
+                or questionary.text(
+                    "Enter Looker Base URL (e.g. https://yourcompany.cloud.looker.com):"
+                ).ask()
+            )
+            looker_client_id = looker_client_id or questionary.text("Enter Looker Client ID:").ask()
+            looker_client_secret = (
+                looker_client_secret or questionary.password("Enter Looker Client Secret:").ask()
+            )
+            if not looker_url or not looker_client_id or not looker_client_secret:
+                console.print(
+                    "[bold red]Error: Looker URL, Client ID, and Client Secret are "
+                    "required.[/bold red]"
+                )
+                raise typer.Exit(1)
 
         if resolved_ext_mode not in ("new", "existing", "skip"):
             ext_choice = questionary.select(
@@ -309,7 +324,10 @@ def main(
             if not looker_connection:
                 with console.status("[bold cyan]Fetching Looker database connections..."):
                     connections = list_looker_connections(
-                        looker_url, looker_client_id, looker_client_secret
+                        looker_url,
+                        looker_client_id,
+                        looker_client_secret,
+                        oauth_account=looker_oauth_account,
                     )
                 if not connections:
                     console.print(
@@ -343,6 +361,14 @@ def main(
                 if not looker_connection:
                     console.print("[bold red]Error: A connection must be selected.[/bold red]")
                     raise typer.Exit(1)
+            if include_sample_lookml is None:
+                include_sample_lookml = bool(
+                    questionary.confirm(
+                        "Include sample LookML view and Executive Business Review dashboard "
+                        "from assets/lookml?",
+                        default=True,
+                    ).ask()
+                )
     else:
         resolved_ext_mode = resolved_ext_mode or "existing"
 
@@ -535,7 +561,7 @@ def main(
     if register_looker:
         console.print("\n[bold cyan]Configuring Looker Action Hub & Extension...[/bold cyan]")
         bundle_path = (
-            _maybe_build_extension_bundle(repo_root, from_source)
+            _maybe_build_extension_bundle(repo_root)
             if resolved_ext_mode == "new"
             else None
         )
@@ -550,9 +576,13 @@ def main(
             model_name=looker_model or "action_pptx_extension",
             connection_name=looker_connection or "",
             bundle_path=bundle_path,
+            include_sample_lookml=bool(include_sample_lookml),
+            oauth_client_id=oauth_client_id or None,
+            oauth_gcs_passthrough=bool(oauth_client_id),
             base_url=looker_url,
             client_id=looker_client_id,
             client_secret=looker_client_secret,
+            oauth_account=looker_oauth_account,
         )
 
     table = Table(
@@ -566,9 +596,18 @@ def main(
     table.add_row("Authorization Token (API Key)", api_key_token)
     table.add_row("Templates GCS URI", templates_gcs_uri)
     table.add_row("Output GCS Package Bucket URI", output_gcs_uri)
-    if deployed_extension_id and looker_url:
-        ext_link = f"{looker_url.rstrip('/')}/extensions/{deployed_extension_id}"
+    ext_link: str | None = None
+    sample_dash_link: str | None = None
+    base_prefix = looker_url.rstrip("/") if looker_url else ""
+    if deployed_extension_id:
+        ext_link = f"{base_prefix}/extensions/{deployed_extension_id}"
         table.add_row("Deployed Looker Extension", ext_link)
+        if include_sample_lookml:
+            resolved_model = looker_model or "action_pptx_extension"
+            sample_dash_link = (
+                f"{base_prefix}/dashboards/{resolved_model}::executive_business_review"
+            )
+            table.add_row("Sample LookML Dashboard", sample_dash_link)
 
     console.print(
         "\n",
@@ -580,6 +619,12 @@ def main(
         ),
     )
     console.print(f"\n[bold cyan]Copyable API Key:[/bold cyan]\n{api_key_token}", soft_wrap=True)
+    if ext_link:
+        console.print(f"\n[bold cyan]Extension URL:[/bold cyan] {ext_link}", soft_wrap=True)
+    if sample_dash_link:
+        console.print(
+            f"[bold cyan]Sample Dashboard URL:[/bold cyan] {sample_dash_link}", soft_wrap=True
+        )
 
     if resolved_ext_mode == "existing":
         manifest_snippet = build_manifest_application_block(service_url, use_local_bundle=False)
