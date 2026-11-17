@@ -561,9 +561,7 @@ def main(
     if register_looker:
         console.print("\n[bold cyan]Configuring Looker Action Hub & Extension...[/bold cyan]")
         bundle_path = (
-            _maybe_build_extension_bundle(repo_root)
-            if resolved_ext_mode == "new"
-            else None
+            _maybe_build_extension_bundle(repo_root) if resolved_ext_mode == "new" else None
         )
         deployed_extension_id = register_action_hub_and_extension(
             service_url=service_url,

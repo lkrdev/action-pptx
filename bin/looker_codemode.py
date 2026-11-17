@@ -180,13 +180,10 @@ def main() -> dict[str, object]:
         hub = accept_integration_hub_legal_agreement(integration_hub_id=hub_id)
 
     integration_id = f"{hub_id}::action-pptx"
-    integ = None
-    for _ in range(3):
-        try:
-            integ = integration(integration_id=integration_id)
-            break
-        except Exception:
-            pass
+    try:
+        integ = integration(integration_id=integration_id)
+    except Exception:
+        integ = None
     if not integ or not integ.get("id"):
         raise RuntimeError(f"Could not find action-pptx integration on hub {hub_id}.")
 

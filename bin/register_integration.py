@@ -14,6 +14,7 @@ import re
 import secrets
 import subprocess
 import tempfile
+import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -208,7 +209,7 @@ def stage_lookml_project_dir(
     if include_sample_lookml and sample_model.is_file():
         model_text = re.sub(
             r'^\s*connection:\s*"[^"]*"',
-            f'connection: "{connection_name}"',
+            lambda _m: f'connection: "{connection_name}"',
             sample_model.read_text(encoding="utf-8"),
             count=1,
             flags=re.M,
@@ -229,7 +230,7 @@ def stage_lookml_project_dir(
             dash_dir.mkdir(exist_ok=True)
             dash_text = re.sub(
                 r"^(\s*model:\s*)\S+",
-                rf"\g<1>{model_name}",
+                lambda m: f"{m.group(1)}{model_name}",
                 sample_dash.read_text(encoding="utf-8"),
                 flags=re.M,
             )
@@ -350,24 +351,32 @@ def register_action_hub_and_extension(
 
     url = normalize_service_base(service_url)
     print(f"Registering Integration Hub {url} via lkr-dev-cli code-mode...")
-    res = _run_lkr_codemode(
-        file_path=CODEMODE_SCRIPT,
-        variables={
-            "action": "setup_hub",
-            "service_url": url,
-            "api_key_token": token,
-            "templates_gcs_uri": templates_gcs_uri,
-            "output_gcs_uri": output_gcs_uri,
-            "required_user_attribute": required_user_attribute,
-            "extension_mode": extension_mode,
-            "project_id": project_id,
-        },
-        base_url=base_url,
-        client_id=client_id,
-        client_secret=client_secret,
-        oauth_account=oauth_account,
-        dev=True,
-    )
+    res: object = {}
+    for attempt in range(3):
+        try:
+            res = _run_lkr_codemode(
+                file_path=CODEMODE_SCRIPT,
+                variables={
+                    "action": "setup_hub",
+                    "service_url": url,
+                    "api_key_token": token,
+                    "templates_gcs_uri": templates_gcs_uri,
+                    "output_gcs_uri": output_gcs_uri,
+                    "required_user_attribute": required_user_attribute,
+                    "extension_mode": extension_mode,
+                    "project_id": project_id,
+                },
+                base_url=base_url,
+                client_id=client_id,
+                client_secret=client_secret,
+                oauth_account=oauth_account,
+                dev=True,
+            )
+            break
+        except RuntimeError as exc:
+            if "Could not find action-pptx integration" not in str(exc) or attempt == 2:
+                raise
+            time.sleep(3)
     if isinstance(res, dict):
         print(
             f"Integration Hub {res.get('hub_action', 'configured')} "
