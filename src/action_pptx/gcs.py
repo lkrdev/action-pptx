@@ -112,19 +112,17 @@ def upload_template_bytes(
 def write_timestamped_output(
     gcs_uri: str,
     prefix: str,
-    webhook_id: str,
     data: bytes,
     allowed_buckets: frozenset[str],
     oauth_token: str | None = None,
 ) -> str:
-    """Write a generated .pptx to an immutable timestamped object path under gcs_uri."""
+    """Write a generated .pptx to a timestamped object path under gcs_uri."""
     safe_prefix = (
         _SAFE_TOKEN_RE.sub("_", (prefix or "presentation").strip()).strip("_").removesuffix(".pptx")
         or "presentation"
     )
-    safe_webhook = _SAFE_TOKEN_RE.sub("_", (webhook_id or "run").strip()).strip("_") or "run"
     ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    filename = f"{safe_prefix}_{ts}_{safe_webhook}.pptx"
+    filename = f"{safe_prefix}_{ts}.pptx"
 
     bucket_name, blob_path, blob = _resolve_blob(gcs_uri, filename, allowed_buckets, oauth_token)
     blob.upload_from_string(data, content_type=PPTX_CONTENT_TYPE)

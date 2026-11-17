@@ -97,7 +97,7 @@ async def test_action_form_lists_gcs_templates_and_checks_buckets(
         )
         assert r_ok.status_code == 200
         fields = r_ok.json()["fields"]
-        assert fields[0]["name"] == "template"
+        assert [f["name"] for f in fields] == ["template", "filename_prefix"]
         assert [o["name"] for o in fields[0]["options"]] == [
             "quarterly/two_period.pptx",
             "executive_summary.pptx",
@@ -217,7 +217,7 @@ async def test_action_execute_merges_and_writes_timestamped_pptx(
     sample_csv_zip_bytes: bytes,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    written_outputs: list[tuple[str, str, str, bytes]] = []
+    written_outputs: list[tuple[str, str, bytes]] = []
 
     monkeypatch.setattr(
         gcs,
@@ -228,13 +228,12 @@ async def test_action_execute_merges_and_writes_timestamped_pptx(
     def _fake_write_output(
         uri: str,
         prefix: str,
-        webhook_id: str,
         data: bytes,
         allowed: frozenset[str],
         oauth_token: str | None = None,
     ) -> str:
-        written_outputs.append((uri, prefix, webhook_id, data))
-        return f"{uri}/{prefix}_20261113T000000Z_{webhook_id}.pptx"
+        written_outputs.append((uri, prefix, data))
+        return f"{uri}/{prefix}_20261113T000000Z.pptx"
 
     monkeypatch.setattr(gcs, "write_timestamped_output", _fake_write_output)
 
@@ -246,7 +245,7 @@ async def test_action_execute_merges_and_writes_timestamped_pptx(
             "X-Looker-Webhook-Id": "wh-99",
         }
         r = await client.post(
-            "/actions/pptx/execute",
+            "/actions/pptx/execute?_theme=%7B%22background_color%22%3A%22%23f6f8fa%22%2C%22primary_button_color%22%3A%22%230b57d0%22%7D",
             headers=headers,
             json={
                 "type": "dashboard",
@@ -261,7 +260,7 @@ async def test_action_execute_merges_and_writes_timestamped_pptx(
                 "scheduled_plan": {
                     "scheduled_plan_id": 42,
                     "title": "QBR Package 81",
-                    "url": "https://looker.example/dashboards/9",
+                    "url": "https://looker.example/dashboards/9?theme=Levis_Light",
                 },
                 "attachment": {
                     "data": base64.encodebytes(sample_csv_zip_bytes).decode("ascii"),
@@ -273,11 +272,9 @@ async def test_action_execute_merges_and_writes_timestamped_pptx(
         assert r.status_code == 200
         looker_resp = r.json()["looker"]
         assert looker_resp["success"] is True
-        assert (
-            "gs://packages-bucket/81/QBR_81_20261113T000000Z_wh-99.pptx" in looker_resp["message"]
-        )
+        assert "gs://packages-bucket/81/QBR_81_20261113T000000Z.pptx" in looker_resp["message"]
         assert len(written_outputs) == 1
-        assert len(written_outputs[0][3]) > 1000
+        assert len(written_outputs[0][2]) > 1000
 
 
 @pytest.mark.asyncio
@@ -443,13 +440,12 @@ async def test_custom_action_oauth_v2_offline_and_passthrough(
     def _write_with_oauth(
         uri: str,
         prefix: str,
-        webhook_id: str,
         data: bytes,
         allowed: frozenset[str],
         oauth_token: str | None = None,
     ) -> str:
         recorded_tokens.append(("write", oauth_token))
-        return f"{uri}/{prefix}_{webhook_id}.pptx"
+        return f"{uri}/{prefix}_20261113T000000Z.pptx"
 
     monkeypatch.setattr(gcs, "list_pptx_templates", _list_with_oauth)
     monkeypatch.setattr(gcs, "download_template_bytes", _download_with_oauth)
@@ -639,11 +635,10 @@ def test_gcs_helpers_and_config_edge_cases(monkeypatch: pytest.MonkeyPatch) -> N
     )
     assert up_uri == "gs://my-bucket/templates/sub/new_deck.pptx"
 
-    out_uri = gcs.write_timestamped_output(
-        "gs://my-bucket/out", "Q3 Report!", "wh#1", b"456", allowed
-    )
+    out_uri = gcs.write_timestamped_output("gs://my-bucket/out", "Q3 Report!", b"456", allowed)
     assert out_uri.startswith("gs://my-bucket/out/Q3_Report_")
-    assert out_uri.endswith("_wh_1.pptx")
+    assert out_uri.endswith("Z.pptx")
+    assert "_wh_" not in out_uri
 
     # Config edge cases
     with pytest.raises(ValueError, match="Invalid GCS URI"):
@@ -684,6 +679,8 @@ def test_looker_palette_preview_and_deploy_manifest_helpers(
     assert 'url: "https://cdn.lkr.dev/apps/action-pptx/latest/bundle.js"' in existing_block
     assert '"https://www.lkr.dev/apps/action-pptx/*"' in existing_block
     assert '"all_themes"' in existing_block
+    assert "new_window: yes" in existing_block
+    assert "use_downloads: yes" in existing_block
 
     new_proj_block = build_manifest_application_block(
         "https://www.lkr.dev/apps/action-pptx", use_local_bundle=True

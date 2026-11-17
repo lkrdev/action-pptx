@@ -926,7 +926,6 @@ export interface LookerThemeOption {
   name: string;
   label: string;
   isDark: boolean;
-  pairCounterpart?: string;
   palette?: LookerThemePalettePayload;
 }
 
@@ -1010,7 +1009,6 @@ export const FALLBACK_LOOKER_THEMES: LookerThemeOption[] = [
       name: `${key}_Dark`,
       label: prettyThemeLabel(`${key}_Dark`),
       isDark: true,
-      pairCounterpart: `${key}_Light`,
       palette: {
         bg_color: "#090d16",
         card_bg: "#111827",
@@ -1024,7 +1022,6 @@ export const FALLBACK_LOOKER_THEMES: LookerThemeOption[] = [
       name: `${key}_Light`,
       label: prettyThemeLabel(`${key}_Light`),
       isDark: false,
-      pairCounterpart: `${key}_Dark`,
       palette: {
         bg_color: "#f0f4f9",
         card_bg: "#ffffff",
@@ -1060,13 +1057,6 @@ export async function loadLookerThemeOptions(core40SDK: any): Promise<LookerThem
     }
 
     const built: LookerThemeOption[] = [];
-    const byLower = new Map<string, string>();
-    for (const t of themesRaw) {
-      const name = String(t?.name || "").trim();
-      if (!name) continue;
-      byLower.set(name.toLowerCase(), name);
-    }
-
     for (const t of themesRaw) {
       const name = String(t?.name || "").trim();
       if (!name) continue;
@@ -1091,18 +1081,10 @@ export async function loadLookerThemeOptions(core40SDK: any): Promise<LookerThem
       );
       const series = (colColors.length > 0 ? colColors : [accent]).slice(0, 6);
 
-      let pairCounterpart: string | undefined;
-      const pairMatch = name.match(/^(.*)_(Dark|Light)$/i);
-      if (pairMatch) {
-        const opp = `${pairMatch[1]}_${pairMatch[2].toLowerCase() === "dark" ? "Light" : "Dark"}`;
-        pairCounterpart = byLower.get(opp.toLowerCase());
-      }
-
       built.push({
         name,
         label: prettyThemeLabel(name),
         isDark: dark,
-        pairCounterpart,
         palette: {
           bg_color: bg,
           card_bg: cardBg,
