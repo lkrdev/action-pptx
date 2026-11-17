@@ -104,7 +104,10 @@ function defaultTimezone(): string {
   }
 }
 
-const makeShortId = (): string => crypto.randomUUID().slice(0, 8);
+const makeShortId = (): string =>
+  typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID().slice(0, 8)
+    : Math.random().toString(36).slice(2, 10);
 
 function createBlankSpec(ownerUserId: string, seed?: SchedulerSeed | null): MasterFanoutSpec {
   const cadence: CadenceSpec = {
@@ -385,6 +388,7 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
   );
 
   useEffect(() => {
+    let active = true;
     setLoadedValues([]);
     setSelectedValues(new Set());
     setQueryFilterExpr("");
@@ -411,6 +415,7 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
         )
       )
       .then((exp: any) => {
+        if (!active) return;
         const dims: ExploreSortOption[] = (exp?.fields?.dimensions || [])
           .map((d: any) => ({
             name: String(d?.name || ""),
@@ -429,7 +434,12 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
         exploreCacheRef.current.set(cacheKey, opts);
         setExploreSortOptions(opts);
       })
-      .catch(() => setExploreSortOptions([]));
+      .catch(() => {
+        if (active) setExploreSortOptions([]);
+      });
+    return () => {
+      active = false;
+    };
   }, [selectedDashFilter?.name, selectedDashFilter?.model, selectedDashFilter?.explore]);
 
   function openEditor(spec: MasterFanoutSpec, prevArtifactKey: string | null) {
@@ -605,19 +615,42 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
         )
     );
 
-    const syncedSlices: FanoutSlice[] = await Promise.all(
-      normalized.slices.map(async (slice) => {
+    const syncedSlices: FanoutSlice[] = [];
+    for (const slice of normalized.slices) {
+      try {
         const body = buildScheduledPlanWriteBody(normalized, slice, dest);
         if (slice.plan_id && livePlansById[String(slice.plan_id)]) {
           const updated = await core40SDK.ok(
             core40SDK.update_scheduled_plan(String(slice.plan_id), body)
           );
-          return { ...slice, plan_id: String(updated?.id || slice.plan_id) };
+          syncedSlices.push({ ...slice, plan_id: String(updated?.id || slice.plan_id) });
+        } else {
+          const created = await core40SDK.ok(core40SDK.create_scheduled_plan(body));
+          const createdId = String(created?.id || "");
+          if (createdId) {
+            setLivePlansById((prev) => ({ ...prev, [createdId]: created }));
+          }
+          syncedSlices.push({ ...slice, plan_id: createdId });
         }
-        const created = await core40SDK.ok(core40SDK.create_scheduled_plan(body));
-        return { ...slice, plan_id: String(created?.id || "") };
-      })
-    );
+      } catch (err) {
+        if (syncedSlices.length > 0) {
+          const partialSpec: MasterFanoutSpec = {
+            ...normalized,
+            slices: [...syncedSlices, ...normalized.slices.slice(syncedSlices.length)],
+          };
+          const partialKey = buildFanoutArtifactKey(
+            ownerId,
+            partialSpec.dashboard_id,
+            partialSpec.id
+          );
+          await saveFanoutArtifact(partialKey, partialSpec).catch(() => {});
+          setDraft((prev) =>
+            prev && prev.id === partialSpec.id ? { ...prev, slices: partialSpec.slices } : prev
+          );
+        }
+        throw err;
+      }
+    }
 
     const finalSpec: MasterFanoutSpec = { ...normalized, slices: syncedSlices };
     const nextKey = buildFanoutArtifactKey(ownerId, finalSpec.dashboard_id, finalSpec.id);
@@ -649,6 +682,13 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
     }
     if (draft.slices.length === 0) {
       setError("Add at least one fanout slice row.");
+      return;
+    }
+    const outputPrefixes = draft.slices.map((s) =>
+      buildSliceOutputPrefix(draft.output_folder, s.slug || s.label).toLowerCase()
+    );
+    if (new Set(outputPrefixes).size !== outputPrefixes.length) {
+      setError("Each fanout slice must resolve to a unique Output Subpath (slug).");
       return;
     }
 
@@ -1731,7 +1771,10 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
                   ) : (
                     displayedDraftSlices.map((s) => {
                       const live = s.plan_id ? livePlansById[s.plan_id] : undefined;
-                      const outPrefix = buildSliceOutputPrefix(draft.output_folder, s.slug);
+                      const outPrefix = buildSliceOutputPrefix(
+                        draft.output_folder,
+                        s.slug || s.label
+                      );
                       return (
                         <tr key={s.id} style={{ borderBottom: `1px solid ${ui.border}` }}>
                           <td style={{ padding: "5px 8px" }}>
