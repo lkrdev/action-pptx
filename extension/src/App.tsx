@@ -486,6 +486,7 @@ export const App: React.FC<AppProps> = ({
 
   // Monotonic sequence guard + SWR-style in-memory caches for instant/race-safe theme switching
   const previewSeqRef = useRef<number>(0);
+  const viewerLoadSeqRef = useRef<number>(0);
   const tileCsvCacheRef = useRef<Map<string, Record<string, string>>>(new Map());
   const previewPptxCacheRef = useRef<Map<string, string>>(new Map());
 
@@ -511,6 +512,8 @@ export const App: React.FC<AppProps> = ({
     if (parsed.path === "/viewer") {
       setRequestedViewerFile(parsed.filename);
       if (!parsed.filename) {
+        viewerLoadSeqRef.current += 1;
+        setViewerLoadingFile("");
         setViewerPptxBase64("");
         setViewerFileName("");
       }
@@ -605,7 +608,17 @@ export const App: React.FC<AppProps> = ({
     ) {
       void handleLoadViewerReport(requestedViewerFile, viewerMode);
     }
-  }, [route, requestedViewerFile, viewerMode, canOpenViewer, config.useOAuth, oauthToken]);
+  }, [
+    route,
+    requestedViewerFile,
+    viewerMode,
+    canOpenViewer,
+    config.useOAuth,
+    oauthToken,
+    viewerFileName,
+    viewerLoadingFile,
+    handleLoadViewerReport,
+  ]);
 
   useEffect(() => {
     const activeBtn = slideStripRef.current?.querySelector<HTMLElement>('[aria-current="true"]');
@@ -651,6 +664,8 @@ export const App: React.FC<AppProps> = ({
     desiredSlideRef.current = 0;
     setPreviewLoading(false);
     if (route === "/viewer") {
+      viewerLoadSeqRef.current += 1;
+      setViewerLoadingFile("");
       setRequestedViewerFile("");
       setViewerPptxBase64("");
       setViewerFileName("");
@@ -833,6 +848,7 @@ export const App: React.FC<AppProps> = ({
   }
 
   async function handleLoadViewerReport(name: string, mode: ViewerMode = viewerMode) {
+    const seq = ++viewerLoadSeqRef.current;
     setRequestedViewerFile(name);
     setViewerLoadingFile(name);
     setPreviewLoadingLabel("Loading presentation...");
@@ -840,16 +856,21 @@ export const App: React.FC<AppProps> = ({
     setActionError("");
     try {
       const { filename, pptxBase64: b64 } = await fetchViewerReport(name, mode);
+      if (seq !== viewerLoadSeqRef.current) return;
       desiredSlideRef.current = 0;
       setRequestedViewerFile(filename);
       setViewerFileName(filename);
       setViewerPptxBase64(b64);
     } catch (err: any) {
-      setRequestedViewerFile("");
-      setActionError(`Could not load "${name}": ${err?.message || err}`);
+      if (seq === viewerLoadSeqRef.current) {
+        setRequestedViewerFile("");
+        setActionError(`Could not load "${name}": ${err?.message || err}`);
+      }
     } finally {
-      setPreviewLoading(false);
-      setViewerLoadingFile("");
+      if (seq === viewerLoadSeqRef.current) {
+        setPreviewLoading(false);
+        setViewerLoadingFile("");
+      }
     }
   }
 

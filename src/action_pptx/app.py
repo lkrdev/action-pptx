@@ -312,7 +312,7 @@ def _resolve_action_theme(
     data: Mapping[str, object],
 ) -> PptxTheme | None:
     url_qs = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(plan_url).query))
-    raw_theme = str(
+    theme_val = (
         request.query_params.get("theme")
         or request.query_params.get("_theme")
         or url_qs.get("theme")
@@ -320,8 +320,10 @@ def _resolve_action_theme(
         or form_params.get("theme")
         or data.get("theme")
         or data.get("_theme")
-        or ""
-    ).strip()
+    )
+    if isinstance(theme_val, Mapping):
+        return theme_from_looker_palette(str(theme_val.get("name") or "URL_Theme"), theme_val)
+    raw_theme = str(theme_val or "").strip()
     if raw_theme.startswith("{"):
         try:
             parsed = json.loads(raw_theme)
