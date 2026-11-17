@@ -109,6 +109,19 @@ def upload_template_bytes(
     return f"gs://{bucket_name}/{blob_path}"
 
 
+def _sanitize_output_prefix(prefix: str) -> str:
+    raw = re.sub(r"\.pptx$", "", (prefix or "").strip(), flags=re.IGNORECASE)
+    parts: list[str] = []
+    for seg in raw.split("/"):
+        trimmed = seg.strip()
+        if trimmed in (".", ".."):
+            raise ValueError(f"Path traversal rejected in output prefix: {prefix!r}")
+        cleaned = _SAFE_TOKEN_RE.sub("_", trimmed).strip("_")
+        if cleaned:
+            parts.append(cleaned)
+    return "/".join(parts) or "presentation"
+
+
 def write_timestamped_output(
     gcs_uri: str,
     prefix: str,
@@ -117,10 +130,7 @@ def write_timestamped_output(
     oauth_token: str | None = None,
 ) -> str:
     """Write a generated .pptx to a timestamped object path under gcs_uri."""
-    safe_prefix = (
-        _SAFE_TOKEN_RE.sub("_", (prefix or "presentation").strip()).strip("_").removesuffix(".pptx")
-        or "presentation"
-    )
+    safe_prefix = _sanitize_output_prefix(prefix)
     ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     filename = f"{safe_prefix}_{ts}.pptx"
 

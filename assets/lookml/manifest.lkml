@@ -22,7 +22,16 @@ application: action_pptx_template_manager {
       "create_user_attribute",
       "delete_user_attribute",
       "all_themes",
-      "all_color_collections"
+      "all_color_collections",
+      "search_scheduled_plans",
+      "create_scheduled_plan",
+      "update_scheduled_plan",
+      "delete_scheduled_plan",
+      "scheduled_plan_run_once_by_id",
+      "artifact",
+      "search_artifacts",
+      "update_artifacts",
+      "delete_artifact"
     ]
     global_user_attributes: ["brand"]
     external_api_urls: [

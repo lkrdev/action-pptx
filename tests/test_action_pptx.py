@@ -640,6 +640,15 @@ def test_gcs_helpers_and_config_edge_cases(monkeypatch: pytest.MonkeyPatch) -> N
     assert out_uri.endswith("Z.pptx")
     assert "_wh_" not in out_uri
 
+    fanout_uri = gcs.write_timestamped_output(
+        "gs://my-bucket/out", "/Q4 EBR/Levi's.pptx", b"789", allowed
+    )
+    assert fanout_uri.startswith("gs://my-bucket/out/Q4_EBR/Levi_s_")
+    assert fanout_uri.endswith("Z.pptx")
+
+    with pytest.raises(ValueError, match="Path traversal rejected in output prefix"):
+        gcs.write_timestamped_output("gs://my-bucket/out", "Q4_EBR/../secret", b"000", allowed)
+
     # Config edge cases
     with pytest.raises(ValueError, match="Invalid GCS URI"):
         parse_and_validate_gcs_uri("https://not-gcs", allowed)

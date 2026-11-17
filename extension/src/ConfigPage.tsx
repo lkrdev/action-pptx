@@ -4,6 +4,7 @@ export interface ExtensionConfigData {
   cloudRunUrl: string;
   templatesGcsUri: string;
   outputGcsUri?: string;
+  actionIntegrationId?: string;
   templatesUserAttributeName?: string;
   useOAuth: boolean;
   oauthClientId?: string;
@@ -140,6 +141,7 @@ export const ConfigPage: React.FC<ConfigPageProps> = ({
     cloudRunUrl: initialConfig.cloudRunUrl || "",
     templatesGcsUri: initialConfig.templatesGcsUri || "",
     outputGcsUri: initialConfig.outputGcsUri || "",
+    actionIntegrationId: initialConfig.actionIntegrationId || "",
     templatesUserAttributeName: initialConfig.templatesUserAttributeName || "",
     useOAuth: Boolean(initialConfig.useOAuth),
     oauthClientId: initialConfig.oauthClientId || "",
@@ -231,6 +233,7 @@ export const ConfigPage: React.FC<ConfigPageProps> = ({
       }
 
       patch({
+        ...(match.id ? { actionIntegrationId: String(match.id) } : {}),
         ...(discoveredOrigin ? { cloudRunUrl: discoveredOrigin } : {}),
         ...(tmplParam?.value ? { templatesGcsUri: String(tmplParam.value) } : {}),
         ...(outParam?.value ? { outputGcsUri: String(outParam.value) } : {}),
@@ -275,6 +278,7 @@ export const ConfigPage: React.FC<ConfigPageProps> = ({
         cloudRunUrl: cfg.cloudRunUrl.trim().replace(/\/+$/, ""),
         templatesGcsUri: cfg.templatesGcsUri.trim(),
         outputGcsUri: cfg.outputGcsUri?.trim() || undefined,
+        actionIntegrationId: cfg.actionIntegrationId?.trim() || undefined,
         templatesUserAttributeName: cfg.templatesUserAttributeName?.trim() || undefined,
         useOAuth: cfg.useOAuth,
         oauthClientId: cfg.oauthClientId?.trim() || undefined,

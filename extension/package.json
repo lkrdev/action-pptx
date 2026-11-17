@@ -4,6 +4,7 @@
   "private": true,
   "description": "Looker Template Manager Extension for action-pptx",
   "scripts": {
+    "test": "node --no-warnings tests/scheduler_check.mts",
     "typecheck": "tsc --noEmit",
     "build": "webpack --mode production"
   },
