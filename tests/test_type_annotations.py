@@ -100,9 +100,10 @@ def test_deploy_docs_and_cli_reference() -> None:
     flags = [
         part
         for default in main_fn.args.defaults
-        for node in ast.walk(default)
-        if isinstance(node, ast.Constant) and isinstance(node.value, str)
-        for part in node.value.split("/")
+        if isinstance(default, ast.Call)
+        for arg in default.args
+        if isinstance(arg, ast.Constant) and isinstance(arg.value, str)
+        for part in arg.value.split("/")
         if part.startswith("--")
     ]
     cli_text = cli_docs.read_text(encoding="utf-8")
