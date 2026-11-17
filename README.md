@@ -32,6 +32,27 @@ Design templates in PowerPoint using Selection Pane names and text tags:
 
 ---
 
+## Agent Skills (`npx skills add`)
+
+Install the PowerPoint templating skills from this repository into Gemini CLI, Claude Code, Cursor, Antigravity, or Copilot with [`npx skills`](https://www.npmjs.com/package/skills):
+
+```bash
+npx skills add lkrdev/action-pptx
+npx skills add lkrdev/action-pptx --skill looker-action-pptx-templates
+```
+
+- **[`looker-action-pptx-templates`](skills/looker-action-pptx-templates/SKILL.md)** *(Master Skill)* — Creates or retrofits `.pptx` templates against existing LookML in two modes:
+  1. **Start from Scratch:** Takes slide masters/layouts, a general narrative idea, and existing LookML to build native templated slides (`chart:<tile_slug>`, `table:<tile_slug>`, `{{tile_slug[row].Column | fmt}}`) plus a validated `dashboard_tiles.json` spec.
+  2. **Retrofit Existing Slides:** Takes a completely built-out static `.pptx` deck without templating and existing LookML, then injects `action-pptx` tags and Selection Pane bindings surgically in place while preserving layouts and typography.
+- **[`pptx-merge`](skills/pptx-merge/SKILL.md)** — Reference for `pptx-merge` binding syntax, format masks, and `inspect` / `validate` / `merge` CLI usage.
+
+> **Scope & Companion LookML Skills:** The skills in `lkrdev/action-pptx` **do not build your LookML models, views, or explores**—they assume your LookML already exists and build `.pptx` templates whose tags match the LookML dashboard you need to make (defaulting to **not** generating LookML dashboards unless you explicitly ask for one). To author or refactor LookML models, explores, and dashboards, install the companion Looker skill sets:
+> - **[`lkrdev/lookml_skills`](https://github.com/lkrdev/lookml_skills)** (`npx skills add lkrdev/lookml_skills`) — Authoring LookML models, views, explores, fields, refinements, and tests.
+> - **[`looker-open-source/looker-skills`](https://github.com/looker-open-source/looker-skills)** (`npx skills add looker-open-source/looker-skills`) — LookML architecture, audits, and LookML dashboard creation (`creating-looker-dashboard`).
+> - **[`lkrdev/cli`](https://github.com/lkrdev/cli)** (`npx skills add lkrdev/cli`) — Looker CLI, `lkr-code-mode`, `agentic-lookml`, `looker-field-profiler`, and `lkr-project-helper`.
+
+---
+
 ## Deployment
 
 [![Open in Cloud Shell](https://gstatic.com/cloudssh/images/open-btn.svg)](https://ssh.cloud.google.com/cloudshell/editor?shellonly=true&cloudshell_git_repo=https://github.com/lkrdev/action-pptx)
