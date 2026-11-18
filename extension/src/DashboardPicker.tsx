@@ -443,6 +443,7 @@ export const DashboardPicker: React.FC<DashboardPickerProps> = ({
 
   return (
     <div ref={wrapRef} style={{ position: "relative", width: "100%", minWidth: 0 }}>
+      <style>{`@keyframes dashPickerProgress{0%{transform:translateX(-100%)}100%{transform:translateX(300%)}}`}</style>
       {/* Search Bar / Selected Dashboard Trigger */}
       <div style={{ display: "flex", gap: 6, alignItems: "center", width: "100%", minWidth: 0 }}>
         <div
@@ -689,7 +690,6 @@ export const DashboardPicker: React.FC<DashboardPickerProps> = ({
                   background: `${ui.accent}24`,
                 }}
               >
-                <style>{`@keyframes dashPickerProgress{0%{transform:translateX(-100%)}100%{transform:translateX(300%)}}`}</style>
                 <div
                   style={{
                     width: "35%",
