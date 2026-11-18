@@ -34,6 +34,7 @@ if str(BIN_DIR) not in sys.path:
 from register_integration import (  # noqa: E402
     build_manifest_application_block,
     list_looker_connections,
+    node_modules_in_sync,
     normalize_service_base,
     register_action_hub_and_extension,
 )
@@ -101,7 +102,7 @@ def _maybe_build_extension_bundle(repo_root: Path) -> str | None:
     dist_bundle = ext_dir / "dist" / "bundle.js"
     if (ext_dir / "package.json").is_file() and shutil.which("npm"):
         console.print("[bold cyan]Building Looker Extension bundle via webpack...[/bold cyan]")
-        if not (ext_dir / "node_modules").is_dir():
+        if not node_modules_in_sync(ext_dir):
             run_cmd(["npm", "ci", "--no-audit", "--no-fund"], cwd=ext_dir)
         run_cmd(["npm", "run", "build"], cwd=ext_dir)
     return str(dist_bundle) if dist_bundle.is_file() else None
