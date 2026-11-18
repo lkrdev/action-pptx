@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import json
 from pathlib import Path
 
 import pytest
@@ -1100,3 +1101,56 @@ def test_register_action_hub_soft_fails_without_blocking_extension(
     assert ext_id == "action-pptx::action_pptx_template_manager"
     assert len(warnings) == 1
     assert "Action Hub registration failed" in warnings[0]
+
+
+def test_node_modules_in_sync(tmp_path: Path) -> None:
+    from bin.register_integration import node_modules_in_sync
+
+    ext = tmp_path / "extension"
+    nm = ext / "node_modules"
+    nm.mkdir(parents=True)
+    react = {"version": "18.3.1", "integrity": "sha512-aaa"}
+    embed = {"version": "2.0.10", "integrity": "sha512-bbb"}
+
+    (ext / "package-lock.json").write_text(
+        json.dumps({"packages": {"": {"version": "0.1.0"}, "node_modules/react": react}}),
+        encoding="utf-8",
+    )
+    assert node_modules_in_sync(ext) is False
+
+    (nm / ".package-lock.json").write_text(
+        json.dumps({"packages": {"node_modules/react": react}}),
+        encoding="utf-8",
+    )
+    assert node_modules_in_sync(ext) is True
+
+    # Git dependency resolved SHA bump with unchanged version and no integrity -> out of sync
+    (ext / "package-lock.json").write_text(
+        json.dumps(
+            {
+                "packages": {
+                    "": {"version": "0.1.0"},
+                    "node_modules/react": {**react, "resolved": "git+https://example.com/r#abc"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert node_modules_in_sync(ext) is False
+
+    (ext / "package-lock.json").write_text(
+        json.dumps(
+            {
+                "packages": {
+                    "": {"version": "0.1.0"},
+                    "node_modules/react": react,
+                    "node_modules/@looker/embed-sdk": embed,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert node_modules_in_sync(ext) is False
+
+    (nm / ".package-lock.json").write_text("{broken", encoding="utf-8")
+    assert node_modules_in_sync(ext) is False

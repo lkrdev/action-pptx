@@ -55,6 +55,27 @@ def build_manifest_application_block(
     return re.sub(r"    external_api_urls:\s*\[[^\]]*\]", urls_block, template)
 
 
+def node_modules_in_sync(ext_dir: Path) -> bool:
+    """Return True when node_modules/.package-lock.json matches package-lock.json."""
+
+    def _pkgs(rel: str) -> dict[str, tuple[object, object, object]] | None:
+        try:
+            raw = json.loads((ext_dir / rel).read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        pkgs = raw.get("packages") if isinstance(raw, dict) else None
+        if not isinstance(pkgs, dict):
+            return None
+        return {
+            str(k): (v.get("version"), v.get("integrity"), v.get("resolved"))
+            for k, v in pkgs.items()
+            if k and isinstance(v, dict)
+        }
+
+    want = _pkgs("package-lock.json")
+    return want is not None and want == _pkgs("node_modules/.package-lock.json")
+
+
 def _load_bundle_js(bundle_path: str | None = None) -> str | None:
     if bundle_path:
         candidate = Path(bundle_path)
