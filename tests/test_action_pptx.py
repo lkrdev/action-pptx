@@ -1124,6 +1124,20 @@ def test_node_modules_in_sync(tmp_path: Path) -> None:
     )
     assert node_modules_in_sync(ext) is True
 
+    # Git dependency resolved SHA bump with unchanged version and no integrity -> out of sync
+    (ext / "package-lock.json").write_text(
+        json.dumps(
+            {
+                "packages": {
+                    "": {"version": "0.1.0"},
+                    "node_modules/react": {**react, "resolved": "git+https://example.com/r#abc"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert node_modules_in_sync(ext) is False
+
     (ext / "package-lock.json").write_text(
         json.dumps(
             {

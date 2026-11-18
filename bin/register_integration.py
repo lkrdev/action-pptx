@@ -58,7 +58,7 @@ def build_manifest_application_block(
 def node_modules_in_sync(ext_dir: Path) -> bool:
     """Return True when node_modules/.package-lock.json matches package-lock.json."""
 
-    def _pkgs(rel: str) -> dict[str, tuple[object, object]] | None:
+    def _pkgs(rel: str) -> dict[str, tuple[object, object, object]] | None:
         try:
             raw = json.loads((ext_dir / rel).read_text(encoding="utf-8"))
         except Exception:
@@ -67,7 +67,7 @@ def node_modules_in_sync(ext_dir: Path) -> bool:
         if not isinstance(pkgs, dict):
             return None
         return {
-            str(k): (v.get("version"), v.get("integrity"))
+            str(k): (v.get("version"), v.get("integrity"), v.get("resolved"))
             for k, v in pkgs.items()
             if k and isinstance(v, dict)
         }
