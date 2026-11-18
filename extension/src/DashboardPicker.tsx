@@ -470,6 +470,7 @@ export const DashboardPicker: React.FC<DashboardPickerProps> = ({
 
   return (
     <div ref={wrapRef} style={{ position: "relative", width: "100%", minWidth: 0 }}>
+      <style>{`@keyframes dashPickerProgress{0%{transform:translateX(-100%)}100%{transform:translateX(300%)}}`}</style>
       {/* Search Bar / Selected Dashboard Trigger */}
       <div style={{ display: "flex", gap: 6, alignItems: "center", width: "100%", minWidth: 0 }}>
         <div
@@ -694,14 +695,38 @@ export const DashboardPicker: React.FC<DashboardPickerProps> = ({
           {(loading || searchingRemote) && (
             <div
               style={{
-                padding: "4px 12px",
-                fontSize: 11,
-                color: ui.accent,
                 borderBottom: `1px solid ${ui.border}`,
                 background: ui.inputBg,
               }}
             >
-              {loading ? "Loading Looker dashboards..." : "Searching Looker instance..."}
+              <div
+                style={{
+                  padding: "4px 12px",
+                  fontSize: 11,
+                  color: ui.accent,
+                }}
+              >
+                {loading ? "Loading Looker dashboards..." : "Searching Looker instance..."}
+              </div>
+              <div
+                role="progressbar"
+                aria-label={loading ? "Loading Looker dashboards" : "Searching Looker instance"}
+                style={{
+                  height: 3,
+                  overflow: "hidden",
+                  background: `${ui.accent}24`,
+                }}
+              >
+                <div
+                  style={{
+                    width: "35%",
+                    height: "100%",
+                    background: ui.accent,
+                    borderRadius: 999,
+                    animation: "dashPickerProgress 1.15s cubic-bezier(0.4, 0, 0.2, 1) infinite",
+                  }}
+                />
+              </div>
             </div>
           )}
 
