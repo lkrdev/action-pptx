@@ -2760,7 +2760,9 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
                     Object.keys(mergeEffectiveFilters(spec.base_filters, s.filters))
                   )
                 )
-              ).sort();
+              ).sort((a, b) => a.localeCompare(b));
+              const mix = (pct: number) =>
+                `color-mix(in srgb, ${ui.accent} ${pct}%, ${ui.cardBg})`;
 
               return (
                 <div
@@ -2978,8 +2980,6 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
                                             FILTER_PILL_SHADES.length
                                         ];
                                       const { kPct, vPct, bPct, solidKey } = shade;
-                                      const mix = (pct: number) =>
-                                        `color-mix(in srgb, ${ui.accent} ${pct}%, ${ui.cardBg})`;
                                       return (
                                         <span
                                           key={k}
