@@ -117,6 +117,19 @@ const WEEKDAYS: Array<{ value: number; label: string }> = [
   { value: 0, label: "Sunday" },
 ];
 
+// ponytail: 4 high-contrast shades of ui.accent via color-mix(); >4 distinct filter keys wrap modulo 4
+const FILTER_PILL_SHADES: ReadonlyArray<{
+  kPct: number;
+  vPct: number;
+  bPct: number;
+  solidKey?: boolean;
+}> = [
+  { kPct: 16, vPct: 6, bPct: 28 },
+  { kPct: 30, vPct: 12, bPct: 44 },
+  { kPct: 76, vPct: 16, bPct: 58, solidKey: true },
+  { kPct: 100, vPct: 22, bPct: 100, solidKey: true },
+];
+
 function defaultTimezone(): string {
   try {
     return Intl.DateTimeFormat().resolvedOptions().timeZone || "America/Los_Angeles";
@@ -2741,6 +2754,13 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
               const samplePlan = spec.slices
                 .map((s) => (s.plan_id ? livePlansById[s.plan_id] : null))
                 .find(Boolean);
+              const cardFilterKeys = Array.from(
+                new Set(
+                  spec.slices.flatMap((s) =>
+                    Object.keys(mergeEffectiveFilters(spec.base_filters, s.filters))
+                  )
+                )
+              ).sort();
 
               return (
                 <div
@@ -2931,13 +2951,76 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
                             spec.output_folder,
                             s.slug || s.label
                           );
+                          const filterPairs = Object.entries(
+                            mergeEffectiveFilters(spec.base_filters, s.filters)
+                          ).sort(([a], [b]) => a.localeCompare(b));
                           return (
                             <tr key={s.id} style={{ borderBottom: `1px solid ${ui.border}` }}>
                               <td style={{ padding: "5px 8px", fontWeight: 600 }}>{s.label}</td>
                               <td style={{ padding: "5px 8px", color: ui.textSecondary }}>
-                                <code>
-                                  {serializeFiltersString(spec.base_filters, s.filters) || "(none)"}
-                                </code>
+                                {filterPairs.length === 0 ? (
+                                  <span style={{ color: ui.textMuted, fontStyle: "italic" }}>
+                                    (none)
+                                  </span>
+                                ) : (
+                                  <div
+                                    style={{
+                                      display: "flex",
+                                      flexWrap: "wrap",
+                                      gap: 4,
+                                      alignItems: "center",
+                                    }}
+                                  >
+                                    {filterPairs.map(([k, v]) => {
+                                      const shade =
+                                        FILTER_PILL_SHADES[
+                                          Math.max(0, cardFilterKeys.indexOf(k)) %
+                                            FILTER_PILL_SHADES.length
+                                        ];
+                                      const { kPct, vPct, bPct, solidKey } = shade;
+                                      const mix = (pct: number) =>
+                                        `color-mix(in srgb, ${ui.accent} ${pct}%, ${ui.cardBg})`;
+                                      return (
+                                        <span
+                                          key={k}
+                                          style={{
+                                            display: "inline-flex",
+                                            alignItems: "stretch",
+                                            borderRadius: 999,
+                                            overflow: "hidden",
+                                            border: `1px solid ${mix(bPct)}`,
+                                            fontSize: 11,
+                                            lineHeight: 1.35,
+                                            whiteSpace: "nowrap",
+                                          }}
+                                        >
+                                          <span
+                                            style={{
+                                              padding: "2px 6px 2px 8px",
+                                              fontWeight: 700,
+                                              background: mix(kPct),
+                                              color: solidKey
+                                                ? ui.accentContrast
+                                                : `color-mix(in srgb, ${ui.accent} 65%, ${ui.textPrimary})`,
+                                            }}
+                                          >
+                                            {k}
+                                          </span>
+                                          <span
+                                            style={{
+                                              padding: "2px 8px 2px 6px",
+                                              fontWeight: 500,
+                                              background: mix(vPct),
+                                              color: ui.textPrimary,
+                                            }}
+                                          >
+                                            {v}
+                                          </span>
+                                        </span>
+                                      );
+                                    })}
+                                  </div>
+                                )}
                               </td>
                               <td style={{ padding: "5px 8px", color: ui.textSecondary }}>
                                 <code>{subPrefix}_&lt;ts&gt;.pptx</code>
