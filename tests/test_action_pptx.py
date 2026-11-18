@@ -783,11 +783,15 @@ def test_stage_lookml_project_dir_and_codemode_ast(tmp_path: Path) -> None:
         encoding="utf-8"
     )
     assert 'connection: "bq_conn"' in model_txt
+    assert 'view_label: ""' not in model_txt
+    assert "datagroup: ebr_daily_datagroup" in model_txt
     assert (staged_sample / "views" / "inventory_items.view.lkml").is_file()
     dash_txt = (
         staged_sample / "dashboards" / "executive_business_review.dashboard.lookml"
     ).read_text(encoding="utf-8")
     assert "model: custom_pptx_model" in dash_txt
+    assert "model: action_pptx" not in dash_txt
+    assert "Region: inventory_items.region" in dash_txt
 
     codemode_path = Path(__file__).resolve().parent.parent / "bin" / "looker_codemode.py"
     codemode_src = codemode_path.read_text(encoding="utf-8")
@@ -801,10 +805,20 @@ def test_stage_lookml_project_dir_and_codemode_ast(tmp_path: Path) -> None:
         "oauthClientId",
         "oauthGcsPassthrough",
         "update_data_app",
+        "update_artifacts",
     ):
         assert key in codemode_src
 
+    import json
+
     captured_ctx: list[tuple[str, dict[str, dict[str, object]]]] = []
+    captured_artifacts: list[tuple[str, list[dict[str, object]]]] = []
+    existing_json = json.dumps(
+        {
+            "template": "simple_template.pptx",
+            "dashboards": [{"id": "3965", "title": "Executive Business Review UDD"}],
+        }
+    )
     ns: dict[str, object] = {
         "action": "configure_extension",
         "service_url": "https://action-pptx.a.run.app/",
@@ -812,14 +826,45 @@ def test_stage_lookml_project_dir_and_codemode_ast(tmp_path: Path) -> None:
         "output_gcs_uri": "gs://b/output",
         "action_integration_id": "28::action-pptx",
         "project_id": "my-pptx-proj",
+        "model_name": "custom_pptx_model",
+        "include_sample_lookml": "true",
         "update_data_app": lambda data_app_id, body: (
             captured_ctx.append((data_app_id, body)) or body
         ),
+        "artifact": lambda namespace, key: (
+            [{"key": key, "version": 4, "value": existing_json}]
+            if "simple-5ftemplate" in key
+            else []
+        ),
+        "update_artifacts": lambda namespace, body: (
+            captured_artifacts.append((namespace, body)) or body
+        ),
+        "dashboard": lambda dashboard_id: {
+            "id": dashboard_id,
+            "title": "Brand Overview",
+        },
     }
     exec(compile(codemode_src, str(codemode_path), "exec"), ns)
     app_id, body = captured_ctx[0]
     assert app_id == "my-pptx-proj::action_pptx_template_manager"
     assert body["context"]["actionIntegrationId"] == "28::action-pptx"
+    assert len(captured_artifacts) == 2
+    simple_ns, simple_body = captured_artifacts[0]
+    assert simple_ns == "my-pptx-proj::action_pptx_template_manager"
+    assert simple_body[0]["key"] == "tpl_links.simple-5ftemplate-2epptx"
+    assert simple_body[0]["version"] == 4
+    parsed_simple = json.loads(str(simple_body[0]["value"]))
+    assert [d["id"] for d in parsed_simple["dashboards"]] == [
+        "custom_pptx_model::executive_business_review",
+        "3965",
+    ]
+    _, embed_body = captured_artifacts[1]
+    assert embed_body[0]["key"] == "tpl_links.embed-5fdemo-5ftemplate-2epptx"
+    assert "version" not in embed_body[0]
+    parsed_embed = json.loads(str(embed_body[0]["value"]))
+    assert parsed_embed["dashboards"] == [
+        {"id": "embed_demo::brand_overview", "title": "Brand Overview"}
+    ]
 
 
 def test_register_action_hub_passes_integration_id_to_update_data_app(
@@ -907,6 +952,14 @@ async def test_outputs_viewer_routes_and_disable_env(
             recorded_oauth.append(oauth_token) or sample_template_bytes
         ),
     )
+    deleted_blobs: list[tuple[str, str, str | None]] = []
+    monkeypatch.setattr(
+        gcs,
+        "delete_template_blob",
+        lambda uri, filename, allowed, oauth_token=None: (
+            deleted_blobs.append((uri, filename, oauth_token)) or f"{uri}/{filename}"
+        ),
+    )
 
     app = create_app()
     transport = ASGITransport(app=app)
@@ -970,6 +1023,22 @@ async def test_outputs_viewer_routes_and_disable_env(
         assert r_tpl_dl.status_code == 200
         assert base64.b64decode(r_tpl_dl.json()["pptx_base64"]) == sample_template_bytes
 
+        r_tpl_del = await client.post(
+            "/templates/delete",
+            headers={"Authorization": "Bearer viewer-oauth-tok"},
+            json={"templates_gcs_uri": "gs://templates-bucket/team", "filename": "QBR_old.pptx"},
+        )
+        assert r_tpl_del.status_code == 200
+        assert r_tpl_del.json()["deleted"] == "QBR_old.pptx"
+        assert deleted_blobs == [("gs://templates-bucket/team", "QBR_old.pptx", "viewer-oauth-tok")]
+
+        r_tpl_del_trav = await client.post(
+            "/templates/delete",
+            headers={"Authorization": f'Token token="{action_env}"'},
+            json={"templates_gcs_uri": "gs://templates-bucket/team", "filename": "../evil.pptx"},
+        )
+        assert r_tpl_del_trav.status_code == 400
+
         # Server env var disables viewer routes and /health flag
         monkeypatch.setenv("DISABLE_REPORT_VIEWER", "true")
         r_health_off = await client.get("/health")
@@ -996,6 +1065,13 @@ async def test_outputs_viewer_routes_and_disable_env(
             json={"templates_gcs_uri": "gs://templates-bucket/team"},
         )
         assert r_tpl_off.status_code == 403
+
+        r_tpl_del_off = await client.post(
+            "/templates/delete",
+            headers={"Authorization": f'Token token="{action_env}"'},
+            json={"templates_gcs_uri": "gs://templates-bucket/team", "filename": "QBR_old.pptx"},
+        )
+        assert r_tpl_del_off.status_code == 403
 
 
 def test_register_action_hub_soft_fails_without_blocking_extension(

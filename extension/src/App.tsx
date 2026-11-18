@@ -18,6 +18,7 @@ import {
   fetchDashboardTileSchemas,
 } from "./dashboardSchema";
 import { SchedulerSeed, SchedulerView } from "./SchedulerView";
+import { buildTemplateLinksArtifactKey, upsertTemplateLinkArtifact } from "./schedulerUtils";
 
 interface AppProps {
   core40SDK: any;
@@ -462,6 +463,16 @@ export const App: React.FC<AppProps> = ({
   const [viewerLoadingFile, setViewerLoadingFile] = useState<string>("");
   const [viewerFileName, setViewerFileName] = useState<string>("");
   const [viewerPptxBase64, setViewerPptxBase64] = useState<string>("");
+  const [confirmDeleteViewerFile, setConfirmDeleteViewerFile] = useState<string>("");
+  const [viewerDeletingFile, setViewerDeletingFile] = useState<string>("");
+
+  const artifactNamespace = useMemo(
+    () =>
+      String(
+        extensionSDK?.lookerHostData?.extensionId || "action-pptx::action_pptx_template_manager"
+      ),
+    [extensionSDK]
+  );
 
   const [lookerThemes, setLookerThemes] = useState<LookerThemeOption[]>(FALLBACK_LOOKER_THEMES);
   const [selectedThemeName, setSelectedThemeName] = useState<string>("Levis_Dark");
@@ -821,6 +832,7 @@ export const App: React.FC<AppProps> = ({
   function handleSwitchViewerMode(nextMode: ViewerMode) {
     if (nextMode === viewerMode) return;
     handleEndPreview();
+    setConfirmDeleteViewerFile("");
     setViewerFiles([]);
     setViewerSourceUri("");
     setActionError("");
@@ -828,6 +840,7 @@ export const App: React.FC<AppProps> = ({
   }
 
   async function loadViewerFiles(mode: ViewerMode = viewerMode) {
+    setConfirmDeleteViewerFile("");
     const bucketUri = await resolveViewerBucketUri(mode);
     setViewerSourceUri(bucketUri);
     if (!bucketUri) {
@@ -908,6 +921,37 @@ export const App: React.FC<AppProps> = ({
       setActionError(`Could not download "${name}": ${err?.message || err}`);
     } finally {
       setViewerLoadingFile("");
+    }
+  }
+
+  async function handleDeleteViewerTemplate(name: string) {
+    if (viewerMode !== "templates") return;
+    const bucketUri = viewerSourceUri || (await resolveViewerBucketUri("templates"));
+    if (!bucketUri) {
+      setActionError(VIEWER_MODE_META.templates.missingUriText);
+      return;
+    }
+    setViewerDeletingFile(name);
+    setActionError("");
+    try {
+      await callCloudRun("/templates/delete", {
+        templates_gcs_uri: bucketUri,
+        filename: name,
+      });
+      if (typeof core40SDK?.delete_artifact === "function") {
+        await core40SDK
+          .ok(core40SDK.delete_artifact(artifactNamespace, buildTemplateLinksArtifactKey(name)))
+          .catch(() => {});
+      }
+      setConfirmDeleteViewerFile("");
+      if (viewerFileName === name) {
+        handleEndPreview();
+      }
+      setViewerFiles((prev) => prev.filter((item) => item.name !== name));
+    } catch (err: any) {
+      setActionError(`Could not delete "${name}": ${err?.message || err}`);
+    } finally {
+      setViewerDeletingFile("");
     }
   }
 
@@ -1072,6 +1116,12 @@ export const App: React.FC<AppProps> = ({
       });
       setReport(res);
       if (res?.gcs_uri) {
+        if (selectedDashboardId) {
+          void upsertTemplateLinkArtifact(core40SDK, artifactNamespace, fileName, {
+            id: selectedDashboardId,
+            title: selectedDashboardTitle || selectedDashboardId,
+          });
+        }
         setSavedNotice(`Saved "${fileName}"`);
       } else {
         setCheckPopoverOpen(true);
@@ -1467,14 +1517,14 @@ export const App: React.FC<AppProps> = ({
                 {isViewerRoute
                   ? "PowerPoint Report Viewer"
                   : isSchedulerRoute
-                    ? "PowerPoint Master Scheduler"
+                    ? "PowerPoint Batch Scheduler"
                     : "PowerPoint Report Builder"}
               </h1>
               <p style={{ margin: "2px 0 0", fontSize: 12, color: ui.textMuted }}>
                 {isViewerRoute
                   ? "Browse and inspect rendered PowerPoint reports and saved templates."
                   : isSchedulerRoute
-                    ? "Fan out one PowerPoint template across N dashboard filter slices on a shared Looker schedule."
+                    ? "Run a PowerPoint template across dashboard filter batches on a shared Looker schedule."
                     : "Preview your PowerPoint template with live Looker dashboard data or save it to your shared library."}
               </p>
             </div>
@@ -1510,7 +1560,7 @@ export const App: React.FC<AppProps> = ({
                     label: "Viewer",
                     show: canOpenViewer || isViewerRoute,
                   },
-                  { id: "btn-nav-scheduler", path: "/scheduler", label: "Scheduler", show: true },
+                  { id: "btn-nav-scheduler", path: "/scheduler", label: "Batches", show: true },
                 ] as const
               )
                 .filter((item) => item.show)
@@ -1852,6 +1902,15 @@ export const App: React.FC<AppProps> = ({
                         filteredViewerFiles.map((f) => {
                           const isSelected = viewerFileName === f.name;
                           const isLoadingRow = viewerLoadingFile === f.name;
+                          const viewerBtnBase: React.CSSProperties = {
+                            background: ui.inputBg,
+                            border: `1px solid ${ui.border}`,
+                            borderRadius: 5,
+                            padding: "4px 9px",
+                            fontSize: 11.5,
+                            fontWeight: 600,
+                            cursor: viewerLoadingFile || viewerDeletingFile ? "wait" : "pointer",
+                          };
                           return (
                             <tr
                               key={f.name}
@@ -1880,6 +1939,7 @@ export const App: React.FC<AppProps> = ({
                                     disabled={Boolean(viewerLoadingFile)}
                                     onClick={() => void handleLoadViewerReport(f.name)}
                                     style={{
+                                      ...viewerBtnBase,
                                       minWidth: 68,
                                       display: "inline-flex",
                                       alignItems: "center",
@@ -1887,11 +1947,7 @@ export const App: React.FC<AppProps> = ({
                                       background: ui.accent,
                                       color: ui.accentContrast,
                                       border: "none",
-                                      borderRadius: 5,
-                                      padding: "4px 9px",
-                                      fontSize: 11.5,
                                       fontWeight: 700,
-                                      cursor: viewerLoadingFile ? "wait" : "pointer",
                                     }}
                                   >
                                     {isLoadingRow ? "Loading..." : "View"}
@@ -1900,19 +1956,48 @@ export const App: React.FC<AppProps> = ({
                                     type="button"
                                     disabled={Boolean(viewerLoadingFile)}
                                     onClick={() => void handleDownloadViewerReport(f.name)}
-                                    style={{
-                                      background: ui.inputBg,
-                                      color: ui.textPrimary,
-                                      border: `1px solid ${ui.border}`,
-                                      borderRadius: 5,
-                                      padding: "4px 9px",
-                                      fontSize: 11.5,
-                                      fontWeight: 600,
-                                      cursor: viewerLoadingFile ? "wait" : "pointer",
-                                    }}
+                                    style={{ ...viewerBtnBase, color: ui.textPrimary }}
                                   >
                                     Download
                                   </button>
+                                  {viewerMode === "templates" &&
+                                    (confirmDeleteViewerFile === f.name ? (
+                                      <>
+                                        <button
+                                          type="button"
+                                          data-testid={`btn-confirm-delete-template-${f.name}`}
+                                          disabled={Boolean(viewerDeletingFile)}
+                                          onClick={() => void handleDeleteViewerTemplate(f.name)}
+                                          style={{
+                                            ...viewerBtnBase,
+                                            background: "#dc2626",
+                                            color: "#ffffff",
+                                            border: "none",
+                                            fontWeight: 700,
+                                          }}
+                                        >
+                                          {viewerDeletingFile === f.name ? "Deleting..." : "Confirm"}
+                                        </button>
+                                        <button
+                                          type="button"
+                                          disabled={Boolean(viewerDeletingFile)}
+                                          onClick={() => setConfirmDeleteViewerFile("")}
+                                          style={{ ...viewerBtnBase, color: ui.textSecondary }}
+                                        >
+                                          Cancel
+                                        </button>
+                                      </>
+                                    ) : (
+                                      <button
+                                        type="button"
+                                        data-testid={`btn-delete-template-${f.name}`}
+                                        disabled={Boolean(viewerLoadingFile || viewerDeletingFile)}
+                                        onClick={() => setConfirmDeleteViewerFile(f.name)}
+                                        style={{ ...viewerBtnBase, color: "#ef4444" }}
+                                      >
+                                        Delete
+                                      </button>
+                                    ))}
                                 </div>
                               </td>
                             </tr>
@@ -2552,7 +2637,7 @@ export const App: React.FC<AppProps> = ({
                     cursor: "pointer",
                   }}
                 >
-                  <span>Schedule Template →</span>
+                  <span>Schedule Batch →</span>
                 </button>
               )}
 

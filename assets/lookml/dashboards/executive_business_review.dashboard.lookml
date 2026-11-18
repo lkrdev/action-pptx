@@ -3,6 +3,20 @@
   layout: newspaper
   preferred_viewer: dashboards-next
   description: "End-to-end 9-tile showcase dashboard for action-pptx (Executive Business Review)"
+  filters:
+  - name: Region
+    title: Region
+    type: field_filter
+    default_value: ""
+    allow_multiple_values: true
+    required: false
+    ui_config:
+      type: checkboxes
+      display: popover
+    model: action_pptx
+    explore: inventory_items
+    listens_to_filters: []
+    field: inventory_items.region
   elements:
   - title: KPI Summary
     name: KPI Summary
@@ -13,6 +27,8 @@
     sorts: [inventory_items.total_spend desc]
     limit: 1
     show_view_names: false
+    listen:
+      Region: inventory_items.region
     row: 0
     col: 0
     width: 8
@@ -28,6 +44,8 @@
     sorts: [inventory_items.metric_sort asc]
     limit: 10
     show_view_names: false
+    listen:
+      Region: inventory_items.region
     row: 0
     col: 8
     width: 8
@@ -43,6 +61,8 @@
     sorts: [inventory_items.cat_sort asc]
     limit: 10
     show_view_names: false
+    listen:
+      Region: inventory_items.region
     row: 0
     col: 16
     width: 8
@@ -57,6 +77,8 @@
     sorts: [inventory_items.quarter asc]
     limit: 10
     show_view_names: false
+    listen:
+      Region: inventory_items.region
     row: 4
     col: 0
     width: 8
@@ -71,6 +93,8 @@
     sorts: [inventory_items.quarter asc]
     limit: 10
     show_view_names: false
+    listen:
+      Region: inventory_items.region
     row: 4
     col: 8
     width: 8
@@ -86,6 +110,8 @@
     sorts: [inventory_items.bridge_sort asc]
     limit: 10
     show_view_names: false
+    listen:
+      Region: inventory_items.region
     row: 4
     col: 16
     width: 8
@@ -101,6 +127,8 @@
     sorts: [inventory_items.region_sort asc]
     limit: 10
     show_view_names: false
+    listen:
+      Region: inventory_items.region
     row: 10
     col: 0
     width: 8
@@ -116,6 +144,8 @@
     sorts: [inventory_items.brand_sort asc]
     limit: 10
     show_view_names: false
+    listen:
+      Region: inventory_items.region
     row: 10
     col: 8
     width: 8
@@ -131,6 +161,8 @@
     sorts: [inventory_items.account_sort asc]
     limit: 10
     show_view_names: false
+    listen:
+      Region: inventory_items.region
     row: 10
     col: 16
     width: 8

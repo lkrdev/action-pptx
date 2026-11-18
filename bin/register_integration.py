@@ -308,6 +308,8 @@ def deploy_extension_to_new_project(
             "output_gcs_uri": output_gcs_uri,
             "action_integration_id": (action_integration_id or "").strip(),
             "project_id": project_id,
+            "model_name": model_name,
+            "include_sample_lookml": "true" if include_sample_lookml else "false",
             "oauth_client_id": (oauth_client_id or "").strip(),
             "oauth_gcs_passthrough": "true" if oauth_gcs_passthrough else "false",
         },

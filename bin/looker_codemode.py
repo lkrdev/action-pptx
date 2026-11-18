@@ -66,6 +66,74 @@ try:
 except NameError:
     _RAW_ACTION_INTEGRATION_ID = ""
 
+try:
+    _RAW_MODEL_NAME = model_name
+except NameError:
+    _RAW_MODEL_NAME = ""
+
+try:
+    _RAW_INCLUDE_SAMPLE_LOOKML = include_sample_lookml
+except NameError:
+    _RAW_INCLUDE_SAMPLE_LOOKML = ""
+
+
+def _encode_dash_key(raw: str) -> str:
+    cleaned = raw.strip()
+    return (
+        "".join(
+            ch if ("a" <= ch <= "z" or "A" <= ch <= "Z" or "0" <= ch <= "9") else f"-{ord(ch):02x}"
+            for ch in cleaned
+        )
+        or "0"
+    )
+
+
+# ponytail: Monty sandbox only exposes re, not json; switch to json.loads/dumps if Monty adds json
+def _json_str(val: str) -> str:
+    escaped = (
+        val.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r")
+    )
+    return f'"{escaped}"'
+
+
+def _upsert_template_link(app_id: str, template_name: str, dash_id: str, dash_title: str) -> bool:
+    key = f"tpl_links.{_encode_dash_key(template_name)}"
+    existing_rows = artifact(namespace=app_id, key=key) or []
+    ver: int | None = None
+    pairs: list[tuple[str, str]] = [(dash_id, dash_title)]
+    if isinstance(existing_rows, list) and existing_rows:
+        first = existing_rows[0]
+        if isinstance(first, dict):
+            raw_ver = first.get("version")
+            if isinstance(raw_ver, int):
+                ver = raw_ver
+            raw_val = _opt_str(first.get("value"))
+            for m in re.finditer(
+                r'"id"\s*:\s*"((?:\\.|[^"\\])*)"\s*,\s*"title"\s*:\s*"((?:\\.|[^"\\])*)"',
+                raw_val,
+            ):
+                eid = m.group(1).replace('\\"', '"').replace("\\\\", "\\")
+                etitle = m.group(2).replace('\\"', '"').replace("\\\\", "\\")
+                if eid and eid != dash_id:
+                    pairs.append((eid, etitle))
+    items_json = ",".join(
+        f'{{"id":{_json_str(did)},"title":{_json_str(dtitle)}}}' for did, dtitle in pairs
+    )
+    val_json = (
+        f'{{"template":{_json_str(template_name)},'
+        f'"dashboards":[{items_json}],'
+        f'"updated_at":"seeded"}}'
+    )
+    entry: dict[str, object] = {
+        "key": key,
+        "value": val_json,
+        "content_type": "application/json",
+    }
+    if ver is not None:
+        entry["version"] = ver
+    update_artifacts(namespace=app_id, body=[entry])
+    return True
+
 
 def _normalize_base(url: str) -> str:
     cleaned = url.strip().rstrip("/")
@@ -100,6 +168,8 @@ def _configure_extension(
     oauth_client_id_val: str,
     oauth_passthrough: bool,
     action_integration_id_val: str = "",
+    model_name_val: str = "",
+    include_sample_lookml_val: bool = False,
 ) -> dict[str, object]:
     app_id = f"{project_id_val}::{EXTENSION_APP_ID}"
     context_data: dict[str, object] = {
@@ -123,10 +193,38 @@ def _configure_extension(
             "configured": False,
             "reason": "update_data_app requires lkr-dev-cli >= 0.0.68",
         }
+
+    seeded_links: list[str] = []
+    if include_sample_lookml_val and model_name_val:
+        try:
+            _upsert_template_link(
+                app_id,
+                "simple_template.pptx",
+                f"{model_name_val}::executive_business_review",
+                "Executive Business Review",
+            )
+            seeded_links.append("simple_template.pptx")
+        except Exception:
+            pass
+
+    try:
+        embed_dash = dashboard(dashboard_id="embed_demo::brand_overview")
+        if isinstance(embed_dash, dict) and embed_dash.get("id"):
+            _upsert_template_link(
+                app_id,
+                "embed_demo_template.pptx",
+                str(embed_dash["id"]),
+                _opt_str(embed_dash.get("title"), "Brand Overview") or "Brand Overview",
+            )
+            seeded_links.append("embed_demo_template.pptx")
+    except Exception:
+        pass
+
     return {
         "extension_id": app_id,
         "configured": True,
         "context": updated.get("context") if isinstance(updated, dict) else context_data,
+        "seeded_template_links": seeded_links,
     }
 
 
@@ -149,6 +247,12 @@ def main() -> dict[str, object]:
             "yes",
         )
         action_integration_id_val = _opt_str(_RAW_ACTION_INTEGRATION_ID).strip()
+        model_name_val = _opt_str(_RAW_MODEL_NAME).strip()
+        include_sample_lookml_val = _opt_str(_RAW_INCLUDE_SAMPLE_LOOKML).strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        )
         return _configure_extension(
             base,
             templates_gcs_uri_val,
@@ -157,6 +261,8 @@ def main() -> dict[str, object]:
             oauth_client_id_val,
             oauth_passthrough,
             action_integration_id_val,
+            model_name_val,
+            include_sample_lookml_val,
         )
 
     api_key_token_val = _opt_str(_RAW_API_KEY_TOKEN)

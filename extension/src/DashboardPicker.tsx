@@ -171,6 +171,8 @@ interface DashboardPickerProps {
   onSelect: (id: string, summary?: DashboardSummary) => void;
   ui: PickerPalette;
   isDark: boolean;
+  suggestedDashboards?: Array<{ id: string; title: string }>;
+  suggestedLabel?: string;
 }
 
 export const DashboardPicker: React.FC<DashboardPickerProps> = ({
@@ -180,6 +182,8 @@ export const DashboardPicker: React.FC<DashboardPickerProps> = ({
   onSelect,
   ui,
   isDark,
+  suggestedDashboards,
+  suggestedLabel,
 }) => {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -323,6 +327,26 @@ export const DashboardPicker: React.FC<DashboardPickerProps> = ({
   const effectiveScope: FilterScope =
     query.trim().length > 0 && scope === "recent" ? "all" : scope;
 
+  const suggestedItems = useMemo(() => {
+    const seen = new Set<string>();
+    const out: DashboardSummary[] = [];
+    for (const s of suggestedDashboards || []) {
+      const sid = String(s?.id || "").trim();
+      if (!sid || seen.has(sid)) continue;
+      seen.add(sid);
+      out.push(
+        catalog.get(sid) || {
+          id: sid,
+          title: String(s?.title || sid).trim() || sid,
+          isLookml: sid.includes("::"),
+        }
+      );
+    }
+    return out;
+  }, [catalog, suggestedDashboards]);
+
+  const suggestedIdSet = useMemo(() => new Set(suggestedItems.map((s) => s.id)), [suggestedItems]);
+
   const filteredItems = useMemo(() => {
     const q = query.trim().toLowerCase();
     const pastedId = extractPastedDashboardId(query);
@@ -384,8 +408,11 @@ export const DashboardPicker: React.FC<DashboardPickerProps> = ({
         return a.title.localeCompare(b.title);
       });
     }
+    if (!q && suggestedItems.length > 0) {
+      return [...suggestedItems, ...sorted.filter((d) => !suggestedIdSet.has(d.id))].slice(0, 120);
+    }
     return sorted.slice(0, 120);
-  }, [allItems, effectiveScope, meInfo, query]);
+  }, [allItems, effectiveScope, meInfo, query, suggestedIdSet, suggestedItems]);
 
   const pastedDirectId = useMemo(() => {
     const pid = extractPastedDashboardId(query);
@@ -737,28 +764,27 @@ export const DashboardPicker: React.FC<DashboardPickerProps> = ({
               filteredItems.map((d, idx) => {
                 const isSelected = d.id === selectedDashboardId;
                 const isHighlighted = idx === activeIdx;
-                const groupLabel =
-                  effectiveScope === "recent" && !query.trim()
-                    ? d.isLookml
-                      ? "LookML Dashboards"
-                      : "Recently Viewed"
-                    : d.isLookml
-                      ? `LookML Model · ${d.modelLabel || d.id.split("::")[0]}`
-                      : d.folderName || "Dashboards";
+                const isSuggested = !query.trim() && suggestedIdSet.has(d.id);
+                const groupOf = (item: DashboardSummary) => {
+                  if (!query.trim() && suggestedIdSet.has(item.id)) {
+                    return suggestedLabel || "★ Linked to Template";
+                  }
+                  if (effectiveScope === "recent" && !query.trim()) {
+                    return item.isLookml ? "LookML Dashboards" : "Recently Viewed";
+                  }
+                  return item.isLookml
+                    ? `LookML Model · ${item.modelLabel || item.id.split("::")[0]}`
+                    : item.folderName || "Dashboards";
+                };
+                const groupLabel = groupOf(d);
                 const prev = idx > 0 ? filteredItems[idx - 1] : null;
-                const prevGroup = prev
-                  ? effectiveScope === "recent" && !query.trim()
-                    ? prev.isLookml
-                      ? "LookML Dashboards"
-                      : "Recently Viewed"
-                    : prev.isLookml
-                      ? `LookML Model · ${prev.modelLabel || prev.id.split("::")[0]}`
-                      : prev.folderName || "Dashboards"
-                  : null;
+                const prevGroup = prev ? groupOf(prev) : null;
                 const showGroupHeader =
-                  ((effectiveScope === "recent" && !query.trim()) ||
+                  (isSuggested ||
+                    (effectiveScope === "recent" && !query.trim()) ||
                     effectiveScope === "shared" ||
-                    effectiveScope === "lookml") &&
+                    effectiveScope === "lookml" ||
+                    (prev != null && !query.trim() && suggestedIdSet.has(prev.id))) &&
                   groupLabel !== prevGroup;
 
                 const subMeta = d.isLookml

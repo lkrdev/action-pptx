@@ -21,6 +21,7 @@ application: action_pptx_template_manager {
       "delete_user_attribute",
       "all_themes",
       "all_color_collections",
+      "all_datagroups",
       "search_scheduled_plans",
       "create_scheduled_plan",
       "update_scheduled_plan",
@@ -44,6 +45,7 @@ application: action_pptx_template_manager {
     local_storage: yes
     new_window: yes
     use_downloads: yes
+    use_embeds: yes
     use_form_submit: yes
   }
 }
