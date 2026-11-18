@@ -19,6 +19,16 @@ The wizard enables required Google Cloud APIs (`run`, `secretmanager`, `storage`
   - **New LookML Project (`new`):** Lists your Looker database connections and prompts you to choose one, creates a bare-Git LookML project, configures the LookML model + connection, deploys `bundle.js` + `manifest.lkml` to production, and pre-populates the path-scoped hidden `action_hub_secret` user attribute.
   - **Existing LookML Project (`existing`):** Prints the ready-to-paste `application: action_pptx_template_manager { ... }` block with your deployed service URL pre-filled in `external_api_urls`.
 
+## Cloud Run Exposure Modes (`--deploy-mode`)
+
+Before deploying to Cloud Run, `./deploy.sh` inspects your GCP project's effective Org Policies (`constraints/run.managed.requireInvokerIam`, `constraints/run.allowedIngress`, `constraints/iam.allowedPolicyMemberDomains`), displays a summary of the GCP services each option adds, and lets both Looker Actions and the Extension work in every mode:
+
+- **`load-balanced` (recommended default):** Restricts Cloud Run ingress to `--ingress=internal-and-cloud-load-balancing` so the `*.a.run.app` endpoint is not directly reachable from the public internet. Choose `--lb-type`:
+  - `external`: Provisions a Serverless NEG, global static IP, Google-managed SSL cert (`--lb-domain`), Global External HTTPS Load Balancer, and a Cloud Armor WAF / CIDR allowlist policy (`--allowed-cidrs`).
+  - `internal`: Provisions a Serverless NEG, Internal Regional HTTPS Load Balancer (VPC-private IP only), and proxy-only VPC subnet routing (no public IP).
+  - `none`: Applies LB-only ingress on Cloud Run without creating an LB, for existing enterprise reverse proxies passed via `--public-base-url`.
+- **`public`:** Exposes `*.a.run.app` directly (`--ingress=all`) without creating Load Balancer or Cloud Armor resources. Blocked if `constraints/run.allowedIngress` forbids `all` or `constraints/run.managed.requireInvokerIam` is enforced.
+
 ## Redeploying & Reconfiguring Looker
 
 `./deploy.sh` checks live GCP and Looker resources so it can be re-run safely:

@@ -22,3 +22,13 @@ output "artifact_registry_repository_url" {
   value       = "${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.repo.repository_id}"
   description = "The Artifact Registry repository URL for pushing your container image."
 }
+
+output "load_balancer_ip" {
+  value       = var.enable_external_lb ? google_compute_global_address.lb_ip[0].address : null
+  description = "Global static IP of the External HTTPS Load Balancer (point lb_domain DNS A record here)."
+}
+
+output "load_balancer_url" {
+  value       = var.enable_external_lb && var.lb_domain != "" ? "https://${var.lb_domain}" : null
+  description = "HTTPS URL of the External Load Balancer when enabled."
+}

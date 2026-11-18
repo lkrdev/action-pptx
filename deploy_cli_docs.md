@@ -29,6 +29,13 @@ $ ./deploy.sh [OPTIONS]
 * `--required-user-attribute <str>`: Optional Looker User Attribute name to restrict who can see and execute this action  [env var: REQUIRED_USER_ATTRIBUTE]
 * `--public-base-url <str>`: Public URL if fronted by a load balancer or proxy (defaults to Cloud Run URL)
 * `--looker-only`: Skip GCP provisioning/deploy and only configure Looker (reads existing secret & URL)
+* `--deploy-mode <str>`: Exposure mode (both support Actions + Extension): 'load-balanced' (recommended; blocks direct .a.run.app access) or 'public' (direct Cloud Run URL)
+* `--lb-type <str>`: Load balancer for load-balanced mode: 'external' (Global HTTPS ALB + Cloud Armor), 'internal' (VPC Internal HTTPS ALB), or 'none' (BYO LB)
+* `--lb-domain <str>`: Custom HTTPS domain for Load Balancer SSL cert and Action Hub URL
+* `--allowed-cidrs <str>`: Comma-separated CIDR ranges for Cloud Armor allowlist (e.g. Looker outbound IPs)
+* `--vpc-network <str>`: VPC network name for internal Load Balancer  [default: default]
+* `--vpc-subnet <str>`: VPC subnet name for internal Load Balancer
+* `--ssl-cert <str>`: Existing regional SSL certificate resource name for internal Load Balancer
 * `--install-completion`: Install completion for the current shell.
 * `--show-completion`: Show completion for the current shell, to copy it or customize the installation.
 * `--help`: Show this message and exit.
