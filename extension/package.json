@@ -9,6 +9,7 @@
     "build": "webpack --mode production"
   },
   "dependencies": {
+    "@looker/embed-sdk": "^2.0.10",
     "@looker/extension-sdk": "^24.18.0",
     "@looker/sdk": "^24.18.0",
     "@looker/sdk-rtl": "^21.6.1",

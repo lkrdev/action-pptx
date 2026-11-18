@@ -109,6 +109,20 @@ def upload_template_bytes(
     return f"gs://{bucket_name}/{blob_path}"
 
 
+def delete_template_blob(
+    gcs_uri: str,
+    filename: str,
+    allowed_buckets: frozenset[str],
+    oauth_token: str | None = None,
+) -> str:
+    """Delete a .pptx template from gcs_uri and return its gs:// URI."""
+    bucket_name, blob_path, blob = _resolve_blob(
+        gcs_uri, sanitize_relative_pptx_name(filename), allowed_buckets, oauth_token
+    )
+    blob.delete()
+    return f"gs://{bucket_name}/{blob_path}"
+
+
 def _sanitize_output_prefix(prefix: str) -> str:
     raw = re.sub(r"\.pptx$", "", (prefix or "").strip(), flags=re.IGNORECASE)
     parts: list[str] = []

@@ -1,3 +1,4 @@
+import { getEmbedSDK, type ILookerConnection } from "@looker/embed-sdk";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Svg } from "./ConfigPage";
 import {
@@ -8,7 +9,9 @@ import {
   PickerPalette,
   TEMPLATE_ORIGINAL_THEME,
 } from "./DashboardPicker";
+import { DashboardTileSchema, fetchDashboardTileSchemas } from "./dashboardSchema";
 import {
+  buildEmbedFilterParams,
   buildFanoutArtifactKey,
   buildFanoutSearchPattern,
   buildScheduledPlanWriteBody,
@@ -16,12 +19,20 @@ import {
   CadenceMode,
   CadenceSpec,
   describeCadence,
+  extractDashboardModels,
   FanoutSlice,
+  findMatchingLinkedTemplate,
+  formatDatagroupValue,
   isSlicePlanDrifted,
   MasterFanoutSpec,
+  mergeEffectiveFilters,
+  parseTemplateLinksArtifacts,
   sanitizeOutputFolder,
   serializeFiltersString,
   slugifySegment,
+  TEMPLATE_LINKS_SEARCH_PATTERN,
+  TemplateDashboardLink,
+  upsertTemplateLinkArtifact,
 } from "./schedulerUtils";
 
 export interface SchedulerSeed {
@@ -47,7 +58,7 @@ interface SchedulerViewProps {
   onOpenViewerSearch: (query: string) => void;
 }
 
-interface StoredFanoutRecord {
+interface StoredBatchRecord {
   artifactKey: string;
   version?: number;
   spec: MasterFanoutSpec;
@@ -71,6 +82,16 @@ interface ExploreSortOption {
 interface LoadedFilterValue {
   value: string;
   metric?: string;
+}
+
+interface DatagroupOption {
+  name: string;
+  model_name: string;
+}
+
+interface TemplateCheckState {
+  status: "idle" | "checking" | "valid" | "invalid";
+  message?: string;
 }
 
 const COMMON_TIMEZONES = [
@@ -109,6 +130,26 @@ const makeShortId = (): string =>
     ? crypto.randomUUID().slice(0, 8)
     : Math.random().toString(36).slice(2, 10);
 
+function applyDashboardSelection(
+  prev: MasterFanoutSpec,
+  dashId: string,
+  dashTitle: string
+): MasterFanoutSpec {
+  const cleanTitle = dashTitle.trim();
+  return {
+    ...prev,
+    dashboard_id: dashId,
+    dashboard_title: cleanTitle || dashId,
+    title: prev.title || (cleanTitle ? `${cleanTitle} Batch` : prev.title),
+    output_folder:
+      prev.output_folder && prev.output_folder !== "batch" && prev.output_folder !== "fanout"
+        ? prev.output_folder
+        : cleanTitle
+          ? slugifySegment(cleanTitle, "batch")
+          : prev.output_folder,
+  };
+}
+
 function createBlankSpec(ownerUserId: string, seed?: SchedulerSeed | null): MasterFanoutSpec {
   const cadence: CadenceSpec = {
     mode: "weekly",
@@ -122,13 +163,13 @@ function createBlankSpec(ownerUserId: string, seed?: SchedulerSeed | null): Mast
   const dashTitle = seed?.dashboardTitle || "";
   return {
     id: makeShortId(),
-    title: dashTitle ? `${dashTitle} Fanout` : "",
+    title: dashTitle ? `${dashTitle} Batch` : "",
     owner_user_id: ownerUserId,
     dashboard_id: seed?.dashboardId || "",
     dashboard_title: dashTitle,
     template: seed?.templateName || "",
     theme: seed?.themeName || TEMPLATE_ORIGINAL_THEME,
-    output_folder: dashTitle ? slugifySegment(dashTitle, "fanout") : "fanout",
+    output_folder: dashTitle ? slugifySegment(dashTitle, "batch") : "batch",
     cadence,
     enabled: true,
     base_filters: {},
@@ -166,8 +207,11 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
   );
   const [filterDashId, setFilterDashId] = useState<string>("");
 
-  const [records, setRecords] = useState<StoredFanoutRecord[]>([]);
+  const [records, setRecords] = useState<StoredBatchRecord[]>([]);
   const [livePlansById, setLivePlansById] = useState<Record<string, any>>({});
+  const [templateLinksMap, setTemplateLinksMap] = useState<
+    Record<string, TemplateDashboardLink[]>
+  >({});
   const [loading, setLoading] = useState<boolean>(true);
   const [busyMessage, setBusyMessage] = useState<string>("");
   const [notice, setNotice] = useState<string>("");
@@ -179,10 +223,24 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
   const [draft, setDraft] = useState<MasterFanoutSpec | null>(null);
   const [templatesList, setTemplatesList] = useState<string[]>([]);
   const [loadingTemplates, setLoadingTemplates] = useState<boolean>(false);
+  const [dashLoading, setDashLoading] = useState<boolean>(false);
+  const [dashLoaded, setDashLoaded] = useState<boolean>(false);
   const [dashFilters, setDashFilters] = useState<DashboardFilterMeta[]>([]);
+  const [dashTileSchemas, setDashTileSchemas] = useState<DashboardTileSchema[]>([]);
+  const [dashDatagroups, setDashDatagroups] = useState<DatagroupOption[]>([]);
+  const [templateCheck, setTemplateCheck] = useState<TemplateCheckState>({ status: "idle" });
   const [showBaseFilters, setShowBaseFilters] = useState<boolean>(false);
+  const [embedOpen, setEmbedOpen] = useState<boolean>(false);
+  const [previewSliceId, setPreviewSliceId] = useState<string>("");
+  const [embedStatus, setEmbedStatus] = useState<
+    "idle" | "connecting" | "running" | "ready" | "error"
+  >("idle");
+  const [embedConnected, setEmbedConnected] = useState<boolean>(false);
+  const embedContainerRef = useRef<HTMLDivElement | null>(null);
+  const embedConnRef = useRef<ILookerConnection | null>(null);
+  const embedAppliedFilterKeyRef = useRef<string>("");
 
-  // Fanout value loader + slice table filter/sort state
+  // Batch filter value loader + delivery table filter/sort state
   const [activeFilterName, setActiveFilterName] = useState<string>("");
   const [exploreSortOptions, setExploreSortOptions] = useState<ExploreSortOption[]>([]);
   const [queryFilterExpr, setQueryFilterExpr] = useState<string>("");
@@ -201,6 +259,10 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
   const [sliceSortAsc, setSliceSortAsc] = useState<boolean>(true);
 
   const exploreCacheRef = useRef<Map<string, ExploreSortOption[]>>(new Map());
+  const allDatagroupsRef = useRef<DatagroupOption[] | null>(null);
+  const templateB64CacheRef = useRef<Map<string, string>>(new Map());
+  const dashLoadSeqRef = useRef<number>(0);
+
   const effectiveUserId = (targetUserIdOverride || meId || "").trim();
   const isAdminInspectingOther = Boolean(
     targetUserIdOverride && meId && targetUserIdOverride.trim() !== meId
@@ -235,6 +297,21 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
     return { uid, dest };
   }
 
+  async function loadTemplateLinks(): Promise<Record<string, TemplateDashboardLink[]>> {
+    if (typeof core40SDK?.search_artifacts !== "function") return {};
+    const rawLinks: any[] = await core40SDK
+      .ok(
+        core40SDK.search_artifacts({
+          namespace: artifactNamespace,
+          key: TEMPLATE_LINKS_SEARCH_PATTERN,
+        })
+      )
+      .catch(() => []);
+    const parsed = parseTemplateLinksArtifacts(rawLinks);
+    setTemplateLinksMap(parsed);
+    return parsed;
+  }
+
   async function refreshSchedules() {
     setLoading(true);
     setError("");
@@ -254,14 +331,15 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
           : {}),
       };
 
-      const [rawArtifacts, rawPlans]: [any[], any[]] = await Promise.all([
+      const [rawArtifacts, rawPlans]: [any[], any[], unknown] = await Promise.all([
         core40SDK
           .ok(core40SDK.search_artifacts({ namespace: artifactNamespace, key: keyPattern }))
           .catch(() => []),
         core40SDK.ok(core40SDK.search_scheduled_plans(planQuery)).catch(() => []),
+        loadTemplateLinks(),
       ]);
 
-      const parsedRecords: StoredFanoutRecord[] = [];
+      const parsedRecords: StoredBatchRecord[] = [];
       for (const art of Array.isArray(rawArtifacts) ? rawArtifacts : []) {
         try {
           const spec = JSON.parse(String(art.value || "")) as MasterFanoutSpec;
@@ -296,7 +374,7 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
       setRecords(parsedRecords);
       setLivePlansById(planMap);
     } catch (err: any) {
-      setError(`Could not load schedules: ${err?.message || err}`);
+      setError(`Could not load batches: ${err?.message || err}`);
     } finally {
       setLoading(false);
     }
@@ -314,10 +392,16 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
     });
   }, [seed]);
 
-  async function loadTemplateOptions(preselect?: string) {
+  async function loadTemplateOptions(
+    preselect?: string,
+    linksOverride?: Record<string, TemplateDashboardLink[]>
+  ) {
     setLoadingTemplates(true);
     try {
-      const uri = await resolveTemplatesGcsUri();
+      const [uri, freshLinks] = await Promise.all([
+        resolveTemplatesGcsUri(),
+        linksOverride ? Promise.resolve(linksOverride) : loadTemplateLinks(),
+      ]);
       if (!uri) return;
       const res = await callCloudRun("/templates/list", { templates_gcs_uri: uri });
       const names = (Array.isArray(res?.files) ? res.files : [])
@@ -326,7 +410,16 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
         .sort();
       setTemplatesList(names);
       if (!preselect && names.length > 0) {
-        setDraft((prev) => (prev && !prev.template ? { ...prev, template: names[0] } : prev));
+        setDraft((prev) => {
+          if (!prev || prev.template || !prev.dashboard_id) return prev;
+          const matched = findMatchingLinkedTemplate(
+            names,
+            freshLinks,
+            prev.dashboard_id,
+            prev.dashboard_title
+          );
+          return matched ? { ...prev, template: matched } : prev;
+        });
       }
     } catch (err: any) {
       setError(`Could not list GCS templates: ${err?.message || err}`);
@@ -335,14 +428,56 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
     }
   }
 
+  async function loadAllDatagroupsOnce(): Promise<DatagroupOption[]> {
+    if (allDatagroupsRef.current !== null) return allDatagroupsRef.current;
+    if (typeof core40SDK?.all_datagroups !== "function") {
+      allDatagroupsRef.current = [];
+      return [];
+    }
+    const raw: any[] = await core40SDK.ok(core40SDK.all_datagroups()).catch(() => []);
+    const cleaned: DatagroupOption[] = (Array.isArray(raw) ? raw : [])
+      .map((dg) => ({
+        name: String(dg?.name || "").trim(),
+        model_name: String(dg?.model_name || "").trim(),
+      }))
+      .filter((dg) => Boolean(dg.name && dg.model_name))
+      .sort((a, b) =>
+        a.model_name !== b.model_name
+          ? a.model_name.localeCompare(b.model_name)
+          : a.name.localeCompare(b.name)
+      );
+    allDatagroupsRef.current = cleaned;
+    return cleaned;
+  }
+
   async function loadDashboardFilterMeta(dashId: string, existingSlices?: FanoutSlice[]) {
+    const seq = ++dashLoadSeqRef.current;
     if (!dashId) {
+      setDashLoading(false);
+      setDashLoaded(false);
       setDashFilters([]);
+      setDashTileSchemas([]);
+      setDashDatagroups([]);
       setActiveFilterName("");
       return;
     }
+    setDashLoading(true);
+    setDashLoaded(false);
     try {
-      const dash = await core40SDK.ok(core40SDK.dashboard(dashId));
+      const [dash, allDgs] = await Promise.all([
+        core40SDK.ok(core40SDK.dashboard(dashId)),
+        loadAllDatagroupsOnce(),
+      ]);
+      if (seq !== dashLoadSeqRef.current) return;
+
+      const schemas = await fetchDashboardTileSchemas(core40SDK, dashId, dash).catch(() => []);
+      if (seq !== dashLoadSeqRef.current) return;
+      setDashTileSchemas(schemas);
+
+      const modelSet = new Set(extractDashboardModels(dash));
+      const matchingDgs = allDgs.filter((dg) => modelSet.has(dg.model_name));
+      setDashDatagroups(matchingDgs);
+
       const rawFilters: any[] = Array.isArray(dash?.dashboard_filters)
         ? dash.dashboard_filters
         : [];
@@ -357,30 +492,117 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
         }))
         .filter((f) => Boolean(f.name));
       setDashFilters(mapped);
+      setDashLoaded(true);
 
       const usedKey = existingSlices?.flatMap((s) => Object.keys(s.filters || {}))[0];
       const nextFilter =
-        (usedKey && mapped.find((m) => m.name === usedKey)?.name) || mapped[0]?.name || usedKey || "";
+        (usedKey && mapped.find((m) => m.name === usedKey)?.name) ||
+        mapped[0]?.name ||
+        usedKey ||
+        "";
       setActiveFilterName(nextFilter);
-      if (dash?.title) {
-        setDraft((prev) =>
-          prev
+
+      const resolvedTitle = String(dash?.title || "").trim();
+      setDraft((prev) => {
+        if (!prev || prev.dashboard_id !== dashId) return prev;
+        const base = applyDashboardSelection(prev, dashId, prev.dashboard_title || resolvedTitle);
+        const matchedTpl = !prev.template
+          ? findMatchingLinkedTemplate(templatesList, templateLinksMap, dashId, base.dashboard_title)
+          : "";
+        const shouldSeedSingleRow = mapped.length === 0 && prev.slices.length === 0;
+        const nextCadence =
+          prev.cadence.mode === "datagroup" && !prev.cadence.datagroup && matchingDgs[0]
             ? {
-                ...prev,
-                dashboard_title: prev.dashboard_title || String(dash.title),
-                title: prev.title || `${dash.title} Fanout`,
-                output_folder:
-                  prev.output_folder && prev.output_folder !== "fanout"
-                    ? prev.output_folder
-                    : slugifySegment(String(dash.title), "fanout"),
+                ...prev.cadence,
+                datagroup: formatDatagroupValue(matchingDgs[0].model_name, matchingDgs[0].name),
               }
-            : prev
-        );
-      }
+            : prev.cadence;
+        return {
+          ...base,
+          ...(matchedTpl ? { template: matchedTpl } : {}),
+          cadence: nextCadence,
+          slices: shouldSeedSingleRow
+            ? [
+                {
+                  id: makeShortId(),
+                  label: "Full Dashboard",
+                  slug: "full_dashboard",
+                  filters: {},
+                },
+              ]
+            : prev.slices,
+        };
+      });
     } catch (err: any) {
-      setError(`Could not inspect dashboard filters: ${err?.message || err}`);
+      if (seq === dashLoadSeqRef.current) {
+        setError(`Could not inspect dashboard: ${err?.message || err}`);
+      }
+    } finally {
+      if (seq === dashLoadSeqRef.current) {
+        setDashLoading(false);
+      }
     }
   }
+
+  // Inline template <-> dashboard tile compatibility check whenever both are selected
+  useEffect(() => {
+    let cancelled = false;
+    const dashId = draft?.dashboard_id?.trim() || "";
+    const tplName = draft?.template?.trim() || "";
+    if (!dashId || !tplName || !dashLoaded || dashTileSchemas.length === 0) {
+      setTemplateCheck({ status: "idle" });
+      return;
+    }
+    setTemplateCheck({ status: "checking" });
+    void (async () => {
+      try {
+        const uri = await resolveTemplatesGcsUri();
+        if (!uri || cancelled) {
+          if (!cancelled) setTemplateCheck({ status: "idle" });
+          return;
+        }
+        const cacheKey = `${uri}::${tplName}`;
+        let b64 = templateB64CacheRef.current.get(cacheKey) || "";
+        if (!b64) {
+          const dl = await callCloudRun("/templates/download", {
+            templates_gcs_uri: uri,
+            filename: tplName,
+          });
+          b64 = String(dl?.pptx_base64 || "");
+          if (b64) templateB64CacheRef.current.set(cacheKey, b64);
+        }
+        if (!b64 || cancelled) {
+          if (!cancelled) setTemplateCheck({ status: "idle" });
+          return;
+        }
+        const valRes = await callCloudRun("/templates/validate", {
+          filename: tplName,
+          pptx_base64: b64,
+          dashboard_tiles: dashTileSchemas,
+        });
+        if (cancelled) return;
+        if (valRes?.valid) {
+          const count = Array.isArray(valRes.bindings) ? valRes.bindings.length : 0;
+          setTemplateCheck({
+            status: "valid",
+            message: `Matches dashboard (${count} binding${count === 1 ? "" : "s"})`,
+          });
+        } else {
+          const firstIssue =
+            Array.isArray(valRes?.issues) && valRes.issues[0]?.message
+              ? String(valRes.issues[0].message)
+              : "Template placeholders do not match this dashboard's tiles.";
+          setTemplateCheck({ status: "invalid", message: firstIssue });
+        }
+      } catch {
+        // ponytail: gracefully skip pre-check if /templates/download is disabled via DISABLE_REPORT_VIEWER=true
+        if (!cancelled) setTemplateCheck({ status: "idle" });
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [draft?.dashboard_id, draft?.template, dashLoaded, dashTileSchemas]);
 
   const selectedDashFilter = useMemo(
     () => dashFilters.find((f) => f.name === activeFilterName) || null,
@@ -457,17 +679,29 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
     setPasteOpen(false);
     setPasteText("");
     setSliceSearch("");
+    setEmbedOpen(false);
+    setPreviewSliceId(cloned.slices[0]?.id || "");
+    setTemplateCheck({ status: "idle" });
     void loadTemplateOptions(cloned.template);
     if (cloned.dashboard_id) {
       void loadDashboardFilterMeta(cloned.dashboard_id, cloned.slices);
     } else {
+      setDashLoaded(false);
       setDashFilters([]);
+      setDashTileSchemas([]);
+      setDashDatagroups([]);
     }
   }
 
   async function handleLoadDimensionValues() {
-    if (!selectedDashFilter?.model || !selectedDashFilter?.explore || !selectedDashFilter?.dimension) {
-      setError("Selected filter has no linked LookML model/explore/dimension; use Paste Values or + Add Row.");
+    if (
+      !selectedDashFilter?.model ||
+      !selectedDashFilter?.explore ||
+      !selectedDashFilter?.dimension
+    ) {
+      setError(
+        "Selected filter has no linked LookML model/explore/dimension; use Paste Values or + Add Row."
+      );
       return;
     }
     setLoadingValues(true);
@@ -531,11 +765,17 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
   const visibleLoadedValues = useMemo(() => {
     const q = valueSearch.trim().toLowerCase();
     const filtered = loadedValues.filter(
-      (item) => !q || item.value.toLowerCase().includes(q) || (item.metric || "").toLowerCase().includes(q)
+      (item) =>
+        !q ||
+        item.value.toLowerCase().includes(q) ||
+        (item.metric || "").toLowerCase().includes(q)
     );
     if (valueClientSort === "query") return filtered;
     return filtered.slice().sort((a, b) => {
-      const cmp = a.value.localeCompare(b.value, undefined, { numeric: true, sensitivity: "base" });
+      const cmp = a.value.localeCompare(b.value, undefined, {
+        numeric: true,
+        sensitivity: "base",
+      });
       return valueClientSort === "asc" ? cmp : -cmp;
     });
   }, [loadedValues, valueSearch, valueClientSort]);
@@ -554,7 +794,7 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
       additions.push({
         id: makeShortId(),
         label: cleaned,
-        slug: slugifySegment(cleaned, "slice"),
+        slug: slugifySegment(cleaned, "delivery"),
         filters: { [filterKey]: cleaned },
       });
     }
@@ -602,7 +842,7 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
     const normalized: MasterFanoutSpec = {
       ...nextSpec,
       owner_user_id: ownerId,
-      output_folder: sanitizeOutputFolder(nextSpec.output_folder, "fanout"),
+      output_folder: sanitizeOutputFolder(nextSpec.output_folder, "batch"),
       updated_at: new Date().toISOString(),
     };
 
@@ -659,13 +899,26 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
     if (prevKey && prevKey !== nextKey) {
       await core40SDK.ok(core40SDK.delete_artifact(artifactNamespace, prevKey)).catch(() => {});
     }
+
+    const linkedDoc = await upsertTemplateLinkArtifact(
+      core40SDK,
+      artifactNamespace,
+      finalSpec.template,
+      {
+        id: finalSpec.dashboard_id,
+        title: finalSpec.dashboard_title || finalSpec.dashboard_id,
+      }
+    );
+    if (linkedDoc) {
+      setTemplateLinksMap((prev) => ({ ...prev, [linkedDoc.template]: linkedDoc.dashboards }));
+    }
   }
 
   async function handleEditorSave(e: React.FormEvent) {
     e.preventDefault();
     if (!draft) return;
     if (!draft.title.trim()) {
-      setError("Schedule title is required.");
+      setError("Batch title is required.");
       return;
     }
     if (!draft.dashboard_id.trim()) {
@@ -676,19 +929,25 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
       setError("Select or enter a .pptx template filename.");
       return;
     }
+    if (templateCheck.status === "invalid") {
+      setError(
+        `Template "${draft.template}" does not match this dashboard: ${templateCheck.message}`
+      );
+      return;
+    }
     if (draft.cadence.mode === "datagroup" && !String(draft.cadence.datagroup || "").trim()) {
-      setError("Enter a LookML datagroup name for datagroup-triggered schedules.");
+      setError("Select a LookML datagroup for datagroup-triggered batches.");
       return;
     }
     if (draft.slices.length === 0) {
-      setError("Add at least one fanout slice row.");
+      setError("Add at least one delivery row.");
       return;
     }
     const outputPrefixes = draft.slices.map((s) =>
       buildSliceOutputPrefix(draft.output_folder, s.slug || s.label).toLowerCase()
     );
     if (new Set(outputPrefixes).size !== outputPrefixes.length) {
-      setError("Each fanout slice must resolve to a unique Output Subpath (slug).");
+      setError("Each delivery row must resolve to a unique Output Subpath.");
       return;
     }
 
@@ -701,7 +960,7 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
       await syncAndSaveSpec(draft, editingPrevKey, prevRec?.spec.slices);
       setDraft(null);
       setEditingPrevKey(null);
-      setNotice(`Saved "${draft.title}" (${draft.slices.length} slice plans synced).`);
+      setNotice(`Saved "${draft.title}" (${draft.slices.length} delivery plan(s) synced).`);
       await refreshSchedules();
     } catch (err: any) {
       setError(`Save & Sync failed: ${err?.message || err}`);
@@ -710,12 +969,12 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
     }
   }
 
-  async function handleCardSync(rec: StoredFanoutRecord) {
+  async function handleCardSync(rec: StoredBatchRecord) {
     setBusyMessage(`Reconciling "${rec.spec.title}"...`);
     setError("");
     try {
       await syncAndSaveSpec(rec.spec, rec.artifactKey, rec.spec.slices);
-      setNotice(`Synced all ${rec.spec.slices.length} slice plans for "${rec.spec.title}".`);
+      setNotice(`Synced all ${rec.spec.slices.length} delivery plan(s) for "${rec.spec.title}".`);
       await refreshSchedules();
     } catch (err: any) {
       setError(`Sync failed: ${err?.message || err}`);
@@ -724,12 +983,12 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
     }
   }
 
-  async function handleRunAllNow(rec: StoredFanoutRecord) {
+  async function handleRunAllNow(rec: StoredBatchRecord) {
     const liveIds = rec.spec.slices
       .map((s) => s.plan_id)
       .filter((pid): pid is string => Boolean(pid && livePlansById[String(pid)]));
     if (liveIds.length === 0) {
-      setError("No synced Looker plans found on this Master Schedule — click Sync Plans first.");
+      setError("No synced Looker plans found on this Batch — click Sync Plans first.");
       return;
     }
     setBusyMessage(`Queueing ${liveIds.length} run(s) in Looker...`);
@@ -746,7 +1005,7 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
     }
   }
 
-  async function handleToggleEnabled(rec: StoredFanoutRecord) {
+  async function handleToggleEnabled(rec: StoredBatchRecord) {
     const nextEnabled = !rec.spec.enabled;
     setBusyMessage(`${nextEnabled ? "Resuming" : "Pausing"} "${rec.spec.title}"...`);
     setError("");
@@ -768,13 +1027,13 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
       setNotice(`${nextEnabled ? "Resumed" : "Paused"} "${rec.spec.title}".`);
       await refreshSchedules();
     } catch (err: any) {
-      setError(`Could not update schedule state: ${err?.message || err}`);
+      setError(`Could not update batch state: ${err?.message || err}`);
     } finally {
       setBusyMessage("");
     }
   }
 
-  async function handleDeleteMaster(rec: StoredFanoutRecord) {
+  async function handleDeleteBatch(rec: StoredBatchRecord) {
     setBusyMessage(`Deleting "${rec.spec.title}"...`);
     setError("");
     try {
@@ -827,6 +1086,10 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
     return fromSlice || dashFilters[0]?.name || "Filter";
   }, [activeFilterName, draft?.slices, dashFilters]);
 
+  const isZeroFilterDashboard = Boolean(
+    draft?.dashboard_id && dashLoaded && dashFilters.length === 0
+  );
+
   const displayedDraftSlices = useMemo(() => {
     if (!draft) return [];
     const q = sliceSearch.trim().toLowerCase();
@@ -870,6 +1133,140 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
     }
   }
 
+  const hostBase = String(extensionSDK?.lookerHostData?.hostUrl || "").replace(/\/+$/, "");
+  const resolvedEmbedHost =
+    hostBase || (window.location?.origin !== "null" ? window.location?.origin || "" : "");
+  const activePreviewSlice = useMemo(() => {
+    if (!draft) return null;
+    return draft.slices.find((s) => s.id === previewSliceId) || draft.slices[0] || null;
+  }, [draft, previewSliceId]);
+  const previewFilterQs = useMemo(
+    () =>
+      draft ? serializeFiltersString(draft.base_filters, activePreviewSlice?.filters || {}) : "",
+    [draft?.base_filters, activePreviewSlice]
+  );
+  const embedFilterParams = useMemo(
+    () =>
+      draft
+        ? buildEmbedFilterParams(
+            draft.base_filters,
+            activePreviewSlice?.filters || {},
+            dashFilters
+          )
+        : {},
+    [draft?.base_filters, activePreviewSlice, dashFilters]
+  );
+  const embedFilterKey = useMemo(() => JSON.stringify(embedFilterParams), [embedFilterParams]);
+  const latestEmbedFilterRef = useRef<{ key: string; params: Record<string, string> }>({
+    key: embedFilterKey,
+    params: embedFilterParams,
+  });
+  latestEmbedFilterRef.current = { key: embedFilterKey, params: embedFilterParams };
+
+  const embedTheme =
+    draft?.theme && draft.theme !== TEMPLATE_ORIGINAL_THEME && draft.theme !== "auto"
+      ? draft.theme
+      : "";
+
+  // Mount / rebuild Looker Embed SDK connection when preview opens or dashboard/theme changes
+  useEffect(() => {
+    const container = embedContainerRef.current;
+    if (!embedOpen || !draft?.dashboard_id || !container) {
+      embedConnRef.current = null;
+      embedAppliedFilterKeyRef.current = "";
+      setEmbedConnected(false);
+      setEmbedStatus("idle");
+      if (container) container.innerHTML = "";
+      return;
+    }
+    if (!resolvedEmbedHost) {
+      setEmbedConnected(false);
+      setEmbedStatus("error");
+      return;
+    }
+
+    let cancelled = false;
+    container.innerHTML = "";
+    embedConnRef.current = null;
+    setEmbedConnected(false);
+    embedAppliedFilterKeyRef.current = latestEmbedFilterRef.current.key;
+    setEmbedStatus("connecting");
+
+    try {
+      const initialFilters = mergeEffectiveFilters(
+        draft.base_filters,
+        activePreviewSlice?.filters || {}
+      );
+      const sdk = getEmbedSDK();
+      sdk.init(resolvedEmbedHost);
+      let builder = sdk
+        .createDashboardWithId(draft.dashboard_id)
+        .appendTo(container)
+        .withClassName("scheduler-embed-iframe")
+        .withAriaLabel("Embedded Dashboard Preview")
+        .withDialogScroll()
+        .withAllowAttr("fullscreen")
+        .on("dashboard:loaded", () => {
+          if (!cancelled) setEmbedStatus("ready");
+        })
+        .on("dashboard:run:start", () => {
+          if (!cancelled) setEmbedStatus("running");
+        })
+        .on("dashboard:run:complete", () => {
+          if (!cancelled) setEmbedStatus("ready");
+        });
+      if (Object.keys(initialFilters).length > 0) {
+        builder = builder.withFilters(initialFilters);
+      }
+      if (embedTheme) {
+        builder = builder.withTheme(embedTheme);
+      }
+
+      builder
+        .build()
+        .connect()
+        .then((conn) => {
+          if (cancelled) return;
+          embedConnRef.current = conn;
+          setEmbedConnected(true);
+          setEmbedStatus((prev) => (prev === "connecting" ? "ready" : prev));
+          const iframe = container.querySelector("iframe");
+          if (iframe) iframe.setAttribute("data-testid", "scheduler-embed-iframe");
+          // Apply any filter edits made while the initial handshake was still connecting
+          if (latestEmbedFilterRef.current.key !== embedAppliedFilterKeyRef.current) {
+            embedAppliedFilterKeyRef.current = latestEmbedFilterRef.current.key;
+            const dashConn = conn.asDashboardConnection();
+            dashConn.updateFilters(latestEmbedFilterRef.current.params);
+            dashConn.run();
+          }
+        })
+        .catch(() => {
+          if (!cancelled) setEmbedStatus("error");
+        });
+    } catch {
+      if (!cancelled) setEmbedStatus("error");
+    }
+
+    return () => {
+      cancelled = true;
+      embedConnRef.current = null;
+      container.innerHTML = "";
+    };
+  }, [embedOpen, draft?.dashboard_id, resolvedEmbedHost, embedTheme]);
+
+  // Push filter updates over the live Embed SDK connection without reloading the iframe
+  useEffect(() => {
+    const conn = embedConnRef.current;
+    if (!embedOpen || !conn) return;
+    if (embedAppliedFilterKeyRef.current === embedFilterKey) return;
+    embedAppliedFilterKeyRef.current = embedFilterKey;
+    const dashConn = conn.asDashboardConnection();
+    dashConn.updateFilters(embedFilterParams);
+    dashConn.run();
+  }, [embedOpen, embedFilterKey, embedFilterParams]);
+
+  const hasMultiDatagroupModels = new Set(dashDatagroups.map((d) => d.model_name)).size > 1;
+
   return (
     <div style={{ display: "grid", gap: 12 }}>
       {isAdminInspectingOther && (
@@ -885,7 +1282,7 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
             fontWeight: 600,
           }}
         >
-          Admin Inspection Mode: viewing &amp; managing Master Fanout schedules for Looker{" "}
+          Admin Inspection Mode: viewing &amp; managing Batches for Looker{" "}
           <code>user_id={targetUserIdOverride}</code>.
         </div>
       )}
@@ -947,11 +1344,13 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
           >
             <div>
               <div style={{ fontSize: 15, fontWeight: 700 }}>
-                {editingPrevKey ? "Edit Master Fanout Schedule" : "New Master Fanout Schedule"}
+                {editingPrevKey ? "Edit Batch" : "New Batch"}
               </div>
               <div style={{ fontSize: 11.5, color: ui.textMuted }}>
-                1 dashboard + 1 template + 1 cadence → N Looker ScheduledPlans writing to{" "}
-                <code>{sanitizeOutputFolder(draft.output_folder, "fanout")}/&lt;slice&gt;_&lt;ts&gt;.pptx</code>
+                1 dashboard + 1 template + 1 cadence → Looker ScheduledPlans writing to{" "}
+                <code>
+                  {sanitizeOutputFolder(draft.output_folder, "batch")}/&lt;delivery&gt;_&lt;ts&gt;.pptx
+                </code>
               </div>
             </div>
             <div style={{ display: "flex", gap: 6 }}>
@@ -968,13 +1367,21 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
               <button
                 id="btn-save-fanout"
                 type="submit"
-                disabled={Boolean(busyMessage)}
+                disabled={Boolean(busyMessage) || templateCheck.status === "invalid"}
+                title={
+                  templateCheck.status === "invalid"
+                    ? templateCheck.message
+                    : "Save batch and sync Looker ScheduledPlans"
+                }
                 style={{
                   ...btnSecondary,
-                  background: "#059669",
-                  color: "#ffffff",
-                  border: "none",
+                  background: templateCheck.status === "invalid" ? ui.inputBg : "#059669",
+                  color: templateCheck.status === "invalid" ? ui.textMuted : "#ffffff",
+                  border: templateCheck.status === "invalid" ? `1px solid ${ui.border}` : "none",
                   fontWeight: 700,
+                  cursor:
+                    busyMessage || templateCheck.status === "invalid" ? "not-allowed" : "pointer",
+                  opacity: templateCheck.status === "invalid" ? 0.65 : 1,
                 }}
               >
                 Save &amp; Sync ({draft.slices.length})
@@ -982,7 +1389,7 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
             </div>
           </div>
 
-          {/* Core Master Metadata */}
+          {/* Core Batch Metadata */}
           <div
             style={{
               display: "grid",
@@ -991,14 +1398,14 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
             }}
           >
             <label>
-              <div style={{ fontSize: 11.5, fontWeight: 700, marginBottom: 4 }}>Master Title</div>
+              <div style={{ fontSize: 11.5, fontWeight: 700, marginBottom: 4 }}>Batch Title</div>
               <input
                 id="input-fanout-title"
                 type="text"
                 required
                 value={draft.title}
                 onChange={(e) => setDraft({ ...draft, title: e.target.value })}
-                placeholder="Quarterly Brand EBR Fanout"
+                placeholder="Quarterly Brand EBR Batch"
                 style={inputStyle}
               />
             </label>
@@ -1023,30 +1430,32 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
               display: "grid",
               gridTemplateColumns: "minmax(0, 1.2fr) minmax(0, 1fr) auto",
               gap: 10,
-              alignItems: "end",
+              alignItems: "start",
             }}
           >
             <div>
               <div style={{ fontSize: 11.5, fontWeight: 700, marginBottom: 4 }}>
-                Source Dashboard
+                Source Dashboard{" "}
+                {dashLoading && (
+                  <span style={{ fontWeight: 400, color: ui.textMuted }}>(loading...)</span>
+                )}
               </div>
               <DashboardPicker
                 core40SDK={core40SDK}
                 extensionSDK={extensionSDK}
                 selectedDashboardId={draft.dashboard_id}
+                suggestedDashboards={draft.template ? templateLinksMap[draft.template] : undefined}
+                suggestedLabel={draft.template ? `★ Linked to ${draft.template}` : undefined}
                 onSelect={(id: string, summary?: DashboardSummary) => {
                   const nextTitle = summary?.title || id;
+                  const matchedTpl = !draft.template
+                    ? findMatchingLinkedTemplate(templatesList, templateLinksMap, id, nextTitle)
+                    : "";
                   setDraft((prev) =>
                     prev
                       ? {
-                          ...prev,
-                          dashboard_id: id,
-                          dashboard_title: nextTitle,
-                          title: prev.title || (nextTitle ? `${nextTitle} Fanout` : ""),
-                          output_folder:
-                            prev.output_folder && prev.output_folder !== "fanout"
-                              ? prev.output_folder
-                              : slugifySegment(nextTitle, "fanout"),
+                          ...applyDashboardSelection(prev, id, nextTitle),
+                          ...(matchedTpl ? { template: matchedTpl } : {}),
                         }
                       : prev
                   );
@@ -1068,7 +1477,29 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
                 <select
                   id="select-fanout-template"
                   value={draft.template}
-                  onChange={(e) => setDraft({ ...draft, template: e.target.value })}
+                  onChange={(e) => {
+                    const nextTpl = e.target.value;
+                    const firstLinked = !draft.dashboard_id
+                      ? templateLinksMap[nextTpl]?.[0]
+                      : undefined;
+                    if (firstLinked?.id) {
+                      setDraft((prev) =>
+                        prev
+                          ? {
+                              ...applyDashboardSelection(
+                                prev,
+                                firstLinked.id,
+                                firstLinked.title || firstLinked.id
+                              ),
+                              template: nextTpl,
+                            }
+                          : prev
+                      );
+                      void loadDashboardFilterMeta(firstLinked.id, draft.slices);
+                    } else {
+                      setDraft({ ...draft, template: nextTpl });
+                    }
+                  }}
                   style={inputStyle}
                 >
                   {!templatesList.includes(draft.template) && draft.template && (
@@ -1093,6 +1524,33 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
                   style={inputStyle}
                 />
               )}
+
+              {templateCheck.status !== "idle" && (
+                <div
+                  data-testid="scheduler-template-check"
+                  style={{
+                    marginTop: 4,
+                    fontSize: 11,
+                    fontWeight: 600,
+                    color:
+                      templateCheck.status === "invalid"
+                        ? isDark
+                          ? "#fca5a5"
+                          : "#dc2626"
+                        : templateCheck.status === "valid"
+                          ? isDark
+                            ? "#34d399"
+                            : "#047857"
+                          : ui.textMuted,
+                  }}
+                >
+                  {templateCheck.status === "checking"
+                    ? "Checking template against dashboard tiles..."
+                    : templateCheck.status === "valid"
+                      ? `✓ ${templateCheck.message}`
+                      : `⚠ ${templateCheck.message}`}
+                </div>
+              )}
             </div>
 
             <div>
@@ -1114,6 +1572,142 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
               />
             </div>
           </div>
+
+          {/* Collapsible Optional Embedded Dashboard Preview */}
+          {draft.dashboard_id && (
+            <div
+              style={{
+                border: `1px solid ${ui.border}`,
+                borderRadius: 8,
+                padding: "8px 10px",
+                background: ui.inputBg,
+                display: "grid",
+                gap: 8,
+              }}
+            >
+              <div
+                style={{
+                  display: "flex",
+                  flexWrap: "wrap",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  gap: 8,
+                }}
+              >
+                <button
+                  type="button"
+                  data-testid="btn-toggle-embed-preview"
+                  onClick={() => setEmbedOpen((v) => !v)}
+                  style={{
+                    background: "none",
+                    border: "none",
+                    padding: 0,
+                    color: ui.textPrimary,
+                    fontSize: 12,
+                    fontWeight: 700,
+                    cursor: "pointer",
+                  }}
+                >
+                  {embedOpen ? "▼" : "▶"} Preview Embedded Dashboard
+                  {previewFilterQs ? (
+                    <span style={{ fontWeight: 500, color: ui.accent, marginLeft: 6 }}>
+                      <code>{previewFilterQs}</code>
+                    </span>
+                  ) : null}
+                </button>
+
+                <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                  {embedOpen && embedStatus !== "idle" && (
+                    <span
+                      data-testid="scheduler-embed-status"
+                      style={{
+                        fontSize: 11,
+                        fontWeight: 600,
+                        padding: "2px 8px",
+                        borderRadius: 999,
+                        background: ui.cardBg,
+                        border: `1px solid ${ui.border}`,
+                        color:
+                          embedStatus === "error"
+                            ? "#dc2626"
+                            : embedStatus === "ready"
+                              ? isDark
+                                ? "#6ee7b7"
+                                : "#059669"
+                              : ui.textMuted,
+                      }}
+                    >
+                      {embedStatus === "connecting"
+                        ? "Connecting…"
+                        : embedStatus === "running"
+                          ? "Running…"
+                          : embedStatus === "ready"
+                            ? "Ready"
+                            : "Embed unavailable"}
+                    </span>
+                  )}
+                  {embedOpen && embedConnected && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const dashConn = embedConnRef.current?.asDashboardConnection();
+                        if (!dashConn) return;
+                        if (embedStatus === "running") dashConn.stop();
+                        else dashConn.run();
+                      }}
+                      style={{ ...btnSecondary, padding: "4px 9px", fontSize: 11.5 }}
+                    >
+                      {embedStatus === "running" ? "Stop" : "Run"}
+                    </button>
+                  )}
+                  {embedOpen && draft.slices.length > 1 && (
+                    <select
+                      aria-label="Preview delivery row"
+                      value={activePreviewSlice?.id || ""}
+                      onChange={(e) => setPreviewSliceId(e.target.value)}
+                      style={{ ...inputStyle, width: "auto", padding: "4px 8px", fontSize: 11.5 }}
+                    >
+                      {draft.slices.map((s) => (
+                        <option key={s.id} value={s.id}>
+                          Preview: {s.label || s.slug}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() =>
+                      extensionSDK?.openBrowserWindow?.(
+                        `/dashboards/${encodeURIComponent(draft.dashboard_id)}${previewFilterQs}`,
+                        "_blank"
+                      )
+                    }
+                    style={{ ...btnSecondary, padding: "4px 9px", fontSize: 11.5 }}
+                  >
+                    Open in Looker ↗
+                  </button>
+                </div>
+              </div>
+
+              {embedOpen && (
+                <>
+                  <style>{`.scheduler-embed-iframe { width: 100%; height: 460px; border: 0; display: block; }`}</style>
+                  <div
+                    ref={embedContainerRef}
+                    data-testid="scheduler-embed-container"
+                    style={{
+                      width: "100%",
+                      minHeight: 460,
+                      border: `1px solid ${ui.border}`,
+                      borderRadius: 6,
+                      overflow: "hidden",
+                      background: "#ffffff",
+                    }}
+                  />
+                </>
+              )}
+            </div>
+          )}
 
           {/* Cadence Controls */}
           <div
@@ -1142,24 +1736,46 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
             </div>
 
             <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "end" }}>
-              <label style={{ minWidth: 130 }}>
+              <label style={{ minWidth: 150 }}>
                 <div style={{ fontSize: 11, color: ui.textMuted, marginBottom: 3 }}>Trigger</div>
                 <select
                   id="select-cadence-mode"
                   value={draft.cadence.mode}
-                  onChange={(e) =>
+                  onChange={(e) => {
+                    const nextMode = e.target.value as CadenceMode;
+                    const defaultDg =
+                      nextMode === "datagroup" &&
+                      !draft.cadence.datagroup &&
+                      dashDatagroups[0]
+                        ? formatDatagroupValue(
+                            dashDatagroups[0].model_name,
+                            dashDatagroups[0].name
+                          )
+                        : draft.cadence.datagroup;
                     setDraft({
                       ...draft,
-                      cadence: { ...draft.cadence, mode: e.target.value as CadenceMode },
-                    })
-                  }
+                      cadence: { ...draft.cadence, mode: nextMode, datagroup: defaultDg },
+                    });
+                  }}
                   style={inputStyle}
                 >
                   <option value="daily">Daily</option>
                   <option value="weekly">Weekly</option>
                   <option value="monthly">Monthly</option>
                   <option value="cron">Custom Cron</option>
-                  <option value="datagroup">Datagroup</option>
+                  <option
+                    value="datagroup"
+                    disabled={Boolean(
+                      draft.dashboard_id &&
+                        dashLoaded &&
+                        dashDatagroups.length === 0 &&
+                        draft.cadence.mode !== "datagroup"
+                    )}
+                  >
+                    {draft.dashboard_id && dashLoaded && dashDatagroups.length === 0
+                      ? "Datagroup update (none on model)"
+                      : "Datagroup update"}
+                  </option>
                 </select>
               </label>
 
@@ -1270,22 +1886,55 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
               )}
 
               {draft.cadence.mode === "datagroup" && (
-                <label style={{ flex: "1 1 200px" }}>
+                <label style={{ flex: "1 1 220px" }}>
                   <div style={{ fontSize: 11, color: ui.textMuted, marginBottom: 3 }}>
-                    LookML Datagroup Name
+                    LookML Datagroup
                   </div>
-                  <input
-                    type="text"
-                    value={draft.cadence.datagroup || ""}
-                    onChange={(e) =>
-                      setDraft({
-                        ...draft,
-                        cadence: { ...draft.cadence, datagroup: e.target.value },
-                      })
-                    }
-                    placeholder="orders_daily_datagroup"
-                    style={inputStyle}
-                  />
+                  {dashDatagroups.length > 0 ? (
+                    <select
+                      id="select-cadence-datagroup"
+                      value={draft.cadence.datagroup || ""}
+                      onChange={(e) =>
+                        setDraft({
+                          ...draft,
+                          cadence: { ...draft.cadence, datagroup: e.target.value },
+                        })
+                      }
+                      style={inputStyle}
+                    >
+                      {draft.cadence.datagroup &&
+                        !dashDatagroups.some(
+                          (dg) =>
+                            formatDatagroupValue(dg.model_name, dg.name) === draft.cadence.datagroup
+                        ) && (
+                          <option value={draft.cadence.datagroup}>{draft.cadence.datagroup}</option>
+                        )}
+                      <option value="" disabled>
+                        Select a datagroup...
+                      </option>
+                      {dashDatagroups.map((dg) => {
+                        const val = formatDatagroupValue(dg.model_name, dg.name);
+                        return (
+                          <option key={val} value={val}>
+                            {hasMultiDatagroupModels ? `${dg.name} (${dg.model_name})` : dg.name}
+                          </option>
+                        );
+                      })}
+                    </select>
+                  ) : (
+                    <input
+                      type="text"
+                      value={draft.cadence.datagroup || ""}
+                      onChange={(e) =>
+                        setDraft({
+                          ...draft,
+                          cadence: { ...draft.cadence, datagroup: e.target.value },
+                        })
+                      }
+                      placeholder="model_name::datagroup_name"
+                      style={inputStyle}
+                    />
+                  )}
                 </label>
               )}
 
@@ -1375,7 +2024,7 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
             </div>
           )}
 
-          {/* Fanout Slice Generator (Load Values limit 500 + Filter & Sort + Paste + Manual) */}
+          {/* Batch Deliveries */}
           <div
             style={{
               border: `1px solid ${ui.border}`,
@@ -1395,313 +2044,354 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
               }}
             >
               <div style={{ fontSize: 12.5, fontWeight: 700 }}>
-                Fanout Slices ({draft.slices.length})
+                Batch Deliveries ({draft.slices.length})
               </div>
-              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                <button
-                  type="button"
-                  onClick={() => setPasteOpen((v) => !v)}
-                  style={btnSecondary}
-                >
-                  {pasteOpen ? "Hide Paste" : "Paste Values"}
-                </button>
-                <button
-                  id="btn-add-slice-row"
-                  type="button"
-                  onClick={() =>
-                    setDraft({
-                      ...draft,
-                      slices: [
-                        ...draft.slices,
-                        {
-                          id: makeShortId(),
-                          label: `Slice ${draft.slices.length + 1}`,
-                          slug: `slice_${draft.slices.length + 1}`,
-                          filters: { [primarySliceFilterKey]: "" },
-                        },
-                      ],
-                    })
-                  }
-                  style={btnSecondary}
-                >
-                  + Add Slice Row
-                </button>
-              </div>
-            </div>
-
-            {/* Query-time Filter & Sort Value Loader */}
-            <div
-              style={{
-                display: "flex",
-                flexWrap: "wrap",
-                gap: 8,
-                alignItems: "end",
-                background: ui.inputBg,
-                padding: 8,
-                borderRadius: 6,
-                border: `1px solid ${ui.border}`,
-              }}
-            >
-              <label style={{ minWidth: 160, flex: "1 1 160px" }}>
-                <div style={{ fontSize: 11, color: ui.textMuted, marginBottom: 3 }}>
-                  Fanout Dashboard Filter
-                </div>
-                {dashFilters.length > 0 ? (
-                  <select
-                    id="select-fanout-filter"
-                    value={activeFilterName}
-                    onChange={(e) => setActiveFilterName(e.target.value)}
-                    style={inputStyle}
-                  >
-                    {dashFilters.map((f) => (
-                      <option key={f.name} value={f.name}>
-                        {f.title} ({f.name})
-                      </option>
-                    ))}
-                  </select>
-                ) : (
-                  <input
-                    type="text"
-                    value={activeFilterName}
-                    onChange={(e) => setActiveFilterName(e.target.value)}
-                    placeholder="Dashboard Filter Name (e.g. Brand)"
-                    style={inputStyle}
-                  />
-                )}
-              </label>
-
-              {selectedDashFilter?.dimension && (
-                <>
-                  <label style={{ flex: "1 1 150px", minWidth: 140 }}>
-                    <div style={{ fontSize: 11, color: ui.textMuted, marginBottom: 3 }}>
-                      Query Filter (Looker expr)
-                    </div>
-                    <input
-                      id="input-query-filter"
-                      type="text"
-                      value={queryFilterExpr}
-                      onChange={(e) => setQueryFilterExpr(e.target.value)}
-                      placeholder="e.g. %Apparel%, -NULL"
-                      style={inputStyle}
-                    />
-                  </label>
-
-                  <label style={{ flex: "1 1 180px", minWidth: 150 }}>
-                    <div style={{ fontSize: 11, color: ui.textMuted, marginBottom: 3 }}>
-                      Sort Query By
-                    </div>
-                    <select
-                      id="select-query-sort-field"
-                      value={querySortField || selectedDashFilter.dimension}
-                      onChange={(e) => {
-                        const nextField = e.target.value;
-                        setQuerySortField(nextField);
-                        const opt = exploreSortOptions.find((o) => o.name === nextField);
-                        if (opt?.kind === "measure") setQuerySortDir("desc");
-                      }}
-                      style={inputStyle}
-                    >
-                      <option value={selectedDashFilter.dimension}>
-                        {selectedDashFilter.dimension} (filter dimension)
-                      </option>
-                      {exploreSortOptions
-                        .filter((o) => o.name !== selectedDashFilter.dimension)
-                        .map((o) => (
-                          <option key={o.name} value={o.name}>
-                            {o.label}
-                          </option>
-                        ))}
-                    </select>
-                  </label>
-
-                  <label style={{ width: 92 }}>
-                    <div style={{ fontSize: 11, color: ui.textMuted, marginBottom: 3 }}>Order</div>
-                    <select
-                      id="select-query-sort-dir"
-                      value={querySortDir}
-                      onChange={(e) => setQuerySortDir(e.target.value as "asc" | "desc")}
-                      style={inputStyle}
-                    >
-                      <option value="asc">ASC ▲</option>
-                      <option value="desc">DESC ▼</option>
-                    </select>
-                  </label>
-
+              {draft.dashboard_id && !isZeroFilterDashboard && (
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                   <button
-                    id="btn-load-filter-values"
                     type="button"
-                    disabled={loadingValues}
-                    onClick={() => void handleLoadDimensionValues()}
-                    style={{
-                      ...btnSecondary,
-                      background: ui.accent,
-                      color: ui.accentContrast,
-                      border: "none",
-                      fontWeight: 700,
-                      padding: "6px 12px",
-                    }}
+                    onClick={() => setPasteOpen((v) => !v)}
+                    style={btnSecondary}
                   >
-                    {loadingValues ? "Loading..." : "Load Values (max 500)"}
+                    {pasteOpen ? "Hide Paste" : "Paste Values"}
                   </button>
-                </>
+                  <button
+                    id="btn-add-slice-row"
+                    type="button"
+                    onClick={() =>
+                      setDraft({
+                        ...draft,
+                        slices: [
+                          ...draft.slices,
+                          {
+                            id: makeShortId(),
+                            label: `Delivery ${draft.slices.length + 1}`,
+                            slug: `delivery_${draft.slices.length + 1}`,
+                            filters: { [primarySliceFilterKey]: "" },
+                          },
+                        ],
+                      })
+                    }
+                    style={btnSecondary}
+                  >
+                    + Add Delivery Row
+                  </button>
+                </div>
               )}
             </div>
 
-            {pasteOpen && (
+            {!draft.dashboard_id ? (
               <div
                 style={{
                   background: ui.inputBg,
-                  border: `1px solid ${ui.border}`,
+                  border: `1px dashed ${ui.border}`,
                   borderRadius: 6,
-                  padding: 8,
-                  display: "grid",
-                  gap: 6,
+                  padding: "12px 14px",
+                  fontSize: 12,
+                  color: ui.textMuted,
                 }}
               >
-                <textarea
-                  rows={4}
-                  value={pasteText}
-                  onChange={(e) => setPasteText(e.target.value)}
-                  placeholder={"Paste one filter value per line...\nLevi's\nCalvin Klein\nDockers"}
-                  style={{ ...inputStyle, fontFamily: "monospace" }}
-                />
-                <div style={{ display: "flex", justifyContent: "flex-end", gap: 6 }}>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      appendValuesAsSlices(pasteText.split(/\r?\n/));
-                      setPasteText("");
-                      setPasteOpen(false);
-                    }}
-                    style={{
-                      ...btnSecondary,
-                      background: ui.accent,
-                      color: ui.accentContrast,
-                      border: "none",
-                    }}
-                  >
-                    Add Pasted Lines as Slices
-                  </button>
-                </div>
+                Select a <strong>Source Dashboard</strong> above to inspect dashboard filters and
+                configure batch deliveries.
               </div>
-            )}
-
-            {/* Loaded Values Picker with Client-Side Filter & Sort */}
-            {loadedValues.length > 0 && (
+            ) : isZeroFilterDashboard ? (
               <div
+                data-testid="scheduler-zero-filters-banner"
                 style={{
                   background: ui.inputBg,
                   border: `1px solid ${ui.border}`,
                   borderRadius: 6,
-                  padding: 8,
-                  display: "grid",
-                  gap: 6,
+                  padding: "8px 12px",
+                  fontSize: 12,
+                  color: ui.textSecondary,
                 }}
               >
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
-                  <input
-                    type="text"
-                    value={valueSearch}
-                    onChange={(e) => setValueSearch(e.target.value)}
-                    placeholder={`Filter ${loadedValues.length} loaded value(s)...`}
-                    style={{ ...inputStyle, flex: "1 1 180px" }}
-                  />
-                  <select
-                    value={valueClientSort}
-                    onChange={(e) =>
-                      setValueClientSort(e.target.value as "query" | "asc" | "desc")
-                    }
-                    style={{ ...inputStyle, width: "auto" }}
-                  >
-                    <option value="query">Sort: Query Order</option>
-                    <option value="asc">Sort: A → Z</option>
-                    <option value="desc">Sort: Z → A</option>
-                  </select>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setSelectedValues(new Set(visibleLoadedValues.map((v) => v.value)))
-                    }
-                    style={btnSecondary}
-                  >
-                    Select All ({visibleLoadedValues.length})
-                  </button>
-                  <button
-                    type="button"
-                    disabled={selectedValues.size === 0}
-                    onClick={() => {
-                      appendValuesAsSlices(Array.from(selectedValues));
-                      setSelectedValues(new Set());
-                    }}
-                    style={{
-                      ...btnSecondary,
-                      background: ui.accent,
-                      color: ui.accentContrast,
-                      border: "none",
-                      opacity: selectedValues.size > 0 ? 1 : 0.5,
-                    }}
-                  >
-                    + Add {selectedValues.size} Selected
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setLoadedValues([])}
-                    style={btnSecondary}
-                  >
-                    Close
-                  </button>
-                </div>
+                <strong>{draft.dashboard_title || draft.dashboard_id}</strong> has no dashboard
+                filters — this batch will run as a single unfiltered PowerPoint delivery.
+              </div>
+            ) : (
+              <>
+                {/* Query-time Filter & Sort Value Loader */}
                 <div
                   style={{
-                    maxHeight: 170,
-                    overflowY: "auto",
                     display: "flex",
                     flexWrap: "wrap",
-                    gap: 5,
-                    paddingTop: 4,
+                    gap: 8,
+                    alignItems: "end",
+                    background: ui.inputBg,
+                    padding: 8,
+                    borderRadius: 6,
+                    border: `1px solid ${ui.border}`,
                   }}
                 >
-                  {visibleLoadedValues.map((item) => {
-                    const checked = selectedValues.has(item.value);
-                    return (
+                  <label style={{ minWidth: 160, flex: "1 1 160px" }}>
+                    <div style={{ fontSize: 11, color: ui.textMuted, marginBottom: 3 }}>
+                      Batch Dashboard Filter
+                    </div>
+                    {dashFilters.length > 0 ? (
+                      <select
+                        id="select-fanout-filter"
+                        value={activeFilterName}
+                        onChange={(e) => setActiveFilterName(e.target.value)}
+                        style={inputStyle}
+                      >
+                        {dashFilters.map((f) => (
+                          <option key={f.name} value={f.name}>
+                            {f.title} ({f.name})
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <input
+                        type="text"
+                        value={activeFilterName}
+                        onChange={(e) => setActiveFilterName(e.target.value)}
+                        placeholder={dashLoading ? "Loading filters..." : "Dashboard Filter Name"}
+                        style={inputStyle}
+                      />
+                    )}
+                  </label>
+
+                  {selectedDashFilter?.dimension && (
+                    <>
+                      <label style={{ flex: "1 1 150px", minWidth: 140 }}>
+                        <div style={{ fontSize: 11, color: ui.textMuted, marginBottom: 3 }}>
+                          Query Filter (Looker expr)
+                        </div>
+                        <input
+                          id="input-query-filter"
+                          type="text"
+                          value={queryFilterExpr}
+                          onChange={(e) => setQueryFilterExpr(e.target.value)}
+                          placeholder="e.g. %Apparel%, -NULL"
+                          style={inputStyle}
+                        />
+                      </label>
+
+                      <label style={{ flex: "1 1 180px", minWidth: 150 }}>
+                        <div style={{ fontSize: 11, color: ui.textMuted, marginBottom: 3 }}>
+                          Sort Query By
+                        </div>
+                        <select
+                          id="select-query-sort-field"
+                          value={querySortField || selectedDashFilter.dimension}
+                          onChange={(e) => {
+                            const nextField = e.target.value;
+                            setQuerySortField(nextField);
+                            const opt = exploreSortOptions.find((o) => o.name === nextField);
+                            if (opt?.kind === "measure") setQuerySortDir("desc");
+                          }}
+                          style={inputStyle}
+                        >
+                          <option value={selectedDashFilter.dimension}>
+                            {selectedDashFilter.dimension} (filter dimension)
+                          </option>
+                          {exploreSortOptions
+                            .filter((o) => o.name !== selectedDashFilter.dimension)
+                            .map((o) => (
+                              <option key={o.name} value={o.name}>
+                                {o.label}
+                              </option>
+                            ))}
+                        </select>
+                      </label>
+
+                      <label style={{ width: 92 }}>
+                        <div style={{ fontSize: 11, color: ui.textMuted, marginBottom: 3 }}>
+                          Order
+                        </div>
+                        <select
+                          id="select-query-sort-dir"
+                          value={querySortDir}
+                          onChange={(e) => setQuerySortDir(e.target.value as "asc" | "desc")}
+                          style={inputStyle}
+                        >
+                          <option value="asc">ASC ▲</option>
+                          <option value="desc">DESC ▼</option>
+                        </select>
+                      </label>
+
                       <button
-                        key={item.value}
+                        id="btn-load-filter-values"
                         type="button"
-                        onClick={() => {
-                          const next = new Set(selectedValues);
-                          if (checked) next.delete(item.value);
-                          else next.add(item.value);
-                          setSelectedValues(next);
-                        }}
+                        disabled={loadingValues}
+                        onClick={() => void handleLoadDimensionValues()}
                         style={{
-                          padding: "3px 8px",
-                          borderRadius: 999,
-                          fontSize: 11.5,
-                          cursor: "pointer",
-                          border: `1px solid ${checked ? ui.accent : ui.border}`,
-                          background: checked ? ui.accent : ui.cardBg,
-                          color: checked ? ui.accentContrast : ui.textPrimary,
+                          ...btnSecondary,
+                          background: ui.accent,
+                          color: ui.accentContrast,
+                          border: "none",
+                          fontWeight: 700,
+                          padding: "6px 12px",
                         }}
                       >
-                        {item.value}
-                        {item.metric !== undefined ? ` (${item.metric})` : ""}
+                        {loadingValues ? "Loading..." : "Load Values (max 500)"}
                       </button>
-                    );
-                  })}
+                    </>
+                  )}
                 </div>
-              </div>
+
+                {pasteOpen && (
+                  <div
+                    style={{
+                      background: ui.inputBg,
+                      border: `1px solid ${ui.border}`,
+                      borderRadius: 6,
+                      padding: 8,
+                      display: "grid",
+                      gap: 6,
+                    }}
+                  >
+                    <textarea
+                      rows={4}
+                      value={pasteText}
+                      onChange={(e) => setPasteText(e.target.value)}
+                      placeholder={
+                        "Paste one filter value per line...\nLevi's\nCalvin Klein\nDockers"
+                      }
+                      style={{ ...inputStyle, fontFamily: "monospace" }}
+                    />
+                    <div style={{ display: "flex", justifyContent: "flex-end", gap: 6 }}>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          appendValuesAsSlices(pasteText.split(/\r?\n/));
+                          setPasteText("");
+                          setPasteOpen(false);
+                        }}
+                        style={{
+                          ...btnSecondary,
+                          background: ui.accent,
+                          color: ui.accentContrast,
+                          border: "none",
+                        }}
+                      >
+                        Add Pasted Lines to Batch
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Loaded Values Picker with Client-Side Filter & Sort */}
+                {loadedValues.length > 0 && (
+                  <div
+                    style={{
+                      background: ui.inputBg,
+                      border: `1px solid ${ui.border}`,
+                      borderRadius: 6,
+                      padding: 8,
+                      display: "grid",
+                      gap: 6,
+                    }}
+                  >
+                    <div
+                      style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}
+                    >
+                      <input
+                        type="text"
+                        value={valueSearch}
+                        onChange={(e) => setValueSearch(e.target.value)}
+                        placeholder={`Filter ${loadedValues.length} loaded value(s)...`}
+                        style={{ ...inputStyle, flex: "1 1 180px" }}
+                      />
+                      <select
+                        value={valueClientSort}
+                        onChange={(e) =>
+                          setValueClientSort(e.target.value as "query" | "asc" | "desc")
+                        }
+                        style={{ ...inputStyle, width: "auto" }}
+                      >
+                        <option value="query">Sort: Query Order</option>
+                        <option value="asc">Sort: A → Z</option>
+                        <option value="desc">Sort: Z → A</option>
+                      </select>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setSelectedValues(new Set(visibleLoadedValues.map((v) => v.value)))
+                        }
+                        style={btnSecondary}
+                      >
+                        Select All ({visibleLoadedValues.length})
+                      </button>
+                      <button
+                        type="button"
+                        disabled={selectedValues.size === 0}
+                        onClick={() => {
+                          appendValuesAsSlices(Array.from(selectedValues));
+                          setSelectedValues(new Set());
+                        }}
+                        style={{
+                          ...btnSecondary,
+                          background: ui.accent,
+                          color: ui.accentContrast,
+                          border: "none",
+                          opacity: selectedValues.size > 0 ? 1 : 0.5,
+                        }}
+                      >
+                        + Add {selectedValues.size} Selected
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setLoadedValues([])}
+                        style={btnSecondary}
+                      >
+                        Close
+                      </button>
+                    </div>
+                    <div
+                      style={{
+                        maxHeight: 170,
+                        overflowY: "auto",
+                        display: "flex",
+                        flexWrap: "wrap",
+                        gap: 5,
+                        paddingTop: 4,
+                      }}
+                    >
+                      {visibleLoadedValues.map((item) => {
+                        const checked = selectedValues.has(item.value);
+                        return (
+                          <button
+                            key={item.value}
+                            type="button"
+                            onClick={() => {
+                              const next = new Set(selectedValues);
+                              if (checked) next.delete(item.value);
+                              else next.add(item.value);
+                              setSelectedValues(next);
+                            }}
+                            style={{
+                              padding: "3px 8px",
+                              borderRadius: 999,
+                              fontSize: 11.5,
+                              cursor: "pointer",
+                              border: `1px solid ${checked ? ui.accent : ui.border}`,
+                              background: checked ? ui.accent : ui.cardBg,
+                              color: checked ? ui.accentContrast : ui.textPrimary,
+                            }}
+                          >
+                            {item.value}
+                            {item.metric !== undefined ? ` (${item.metric})` : ""}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </>
             )}
 
-            {/* Slice Table Filter & Sort Controls */}
-            {draft.slices.length > 0 && (
+            {/* Delivery Table Filter & Sort Controls */}
+            {draft.slices.length > 1 && (
               <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                 <input
                   id="input-slice-table-filter"
                   type="text"
                   value={sliceSearch}
                   onChange={(e) => setSliceSearch(e.target.value)}
-                  placeholder="Filter slice rows by label, output slug, or filter value..."
-                  style={{ ...inputStyle, maxWidth: 340 }}
+                  placeholder="Filter delivery rows by label, output subpath, or filter value..."
+                  style={{ ...inputStyle, maxWidth: 360 }}
                 />
                 <span style={{ fontSize: 11.5, color: ui.textMuted }}>
                   Showing {displayedDraftSlices.length} of {draft.slices.length}
@@ -1709,176 +2399,203 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
               </div>
             )}
 
-            <div
-              style={{
-                border: `1px solid ${ui.border}`,
-                borderRadius: 6,
-                overflowX: "auto",
-                maxHeight: 320,
-              }}
-            >
-              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-                <thead>
-                  <tr
-                    style={{
-                      background: ui.inputBg,
-                      borderBottom: `1px solid ${ui.border}`,
-                      textAlign: "left",
-                    }}
-                  >
-                    {(
-                      [
-                        ["label", "Slice Label"],
-                        ["slug", "Output Subpath"],
-                        ["value", `Filter: ${primarySliceFilterKey}`],
-                        ["status", "Plan Status"],
-                      ] as const
-                    ).map(([key, col]) => (
-                      <th key={key} style={{ padding: "6px 8px", fontWeight: 700 }}>
-                        <button
-                          type="button"
-                          onClick={() => toggleSliceSort(key)}
-                          style={{
-                            background: "none",
-                            border: "none",
-                            padding: 0,
-                            color: ui.textPrimary,
-                            font: "inherit",
-                            fontWeight: 700,
-                            cursor: "pointer",
-                          }}
-                        >
-                          {col}
-                          {sliceSortKey === key ? (sliceSortAsc ? " ▲" : " ▼") : ""}
-                        </button>
-                      </th>
-                    ))}
-                    <th style={{ padding: "6px 8px", width: 40 }} />
-                  </tr>
-                </thead>
-                <tbody>
-                  {displayedDraftSlices.length === 0 ? (
-                    <tr>
-                      <td
-                        colSpan={5}
-                        style={{ padding: 14, textAlign: "center", color: ui.textMuted }}
-                      >
-                        {draft.slices.length === 0
-                          ? "Load filter values above, paste lines, or click + Add Slice Row."
-                          : "No slice rows match your filter."}
-                      </td>
+            {draft.dashboard_id && (
+              <div
+                style={{
+                  border: `1px solid ${ui.border}`,
+                  borderRadius: 6,
+                  overflowX: "auto",
+                  maxHeight: 320,
+                }}
+              >
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                  <thead>
+                    <tr
+                      style={{
+                        background: ui.inputBg,
+                        borderBottom: `1px solid ${ui.border}`,
+                        textAlign: "left",
+                      }}
+                    >
+                      {(
+                        [
+                          ["label", "Delivery Label"],
+                          ["slug", "Output Subpath"],
+                          ...(!isZeroFilterDashboard
+                            ? ([["value", `Filter: ${primarySliceFilterKey}`]] as const)
+                            : []),
+                          ["status", "Plan Status"],
+                        ] as const
+                      ).map(([key, col]) => (
+                        <th key={key} style={{ padding: "6px 8px", fontWeight: 700 }}>
+                          <button
+                            type="button"
+                            onClick={() => toggleSliceSort(key)}
+                            style={{
+                              background: "none",
+                              border: "none",
+                              padding: 0,
+                              color: ui.textPrimary,
+                              font: "inherit",
+                              fontWeight: 700,
+                              cursor: "pointer",
+                            }}
+                          >
+                            {col}
+                            {sliceSortKey === key ? (sliceSortAsc ? " ▲" : " ▼") : ""}
+                          </button>
+                        </th>
+                      ))}
+                      <th style={{ padding: "6px 8px", width: 80 }} />
                     </tr>
-                  ) : (
-                    displayedDraftSlices.map((s) => {
-                      const live = s.plan_id ? livePlansById[s.plan_id] : undefined;
-                      const outPrefix = buildSliceOutputPrefix(
-                        draft.output_folder,
-                        s.slug || s.label
-                      );
-                      return (
-                        <tr key={s.id} style={{ borderBottom: `1px solid ${ui.border}` }}>
-                          <td style={{ padding: "5px 8px" }}>
-                            <input
-                              type="text"
-                              value={s.label}
-                              onChange={(e) =>
-                                setDraft({
-                                  ...draft,
-                                  slices: draft.slices.map((row) =>
-                                    row.id === s.id ? { ...row, label: e.target.value } : row
-                                  ),
-                                })
-                              }
-                              style={inputStyle}
-                            />
-                          </td>
-                          <td style={{ padding: "5px 8px" }}>
-                            <input
-                              type="text"
-                              value={s.slug}
-                              onChange={(e) =>
-                                setDraft({
-                                  ...draft,
-                                  slices: draft.slices.map((row) =>
-                                    row.id === s.id ? { ...row, slug: e.target.value } : row
-                                  ),
-                                })
-                              }
-                              style={inputStyle}
-                            />
-                            <div style={{ fontSize: 10.5, color: ui.textMuted, marginTop: 2 }}>
-                              <code>{outPrefix}_&lt;ts&gt;.pptx</code>
-                            </div>
-                          </td>
-                          <td style={{ padding: "5px 8px" }}>
-                            <input
-                              type="text"
-                              value={s.filters?.[primarySliceFilterKey] ?? ""}
-                              onChange={(e) =>
-                                setDraft({
-                                  ...draft,
-                                  slices: draft.slices.map((row) =>
-                                    row.id === s.id
-                                      ? {
-                                          ...row,
-                                          filters: {
-                                            ...row.filters,
-                                            [primarySliceFilterKey]: e.target.value,
-                                          },
-                                        }
-                                      : row
-                                  ),
-                                })
-                              }
-                              placeholder="Filter value..."
-                              style={inputStyle}
-                            />
-                          </td>
-                          <td style={{ padding: "5px 8px", whiteSpace: "nowrap", fontSize: 11.5 }}>
-                            {live ? (
-                              <span style={{ color: isDark ? "#34d399" : "#047857" }}>
-                                Plan #{s.plan_id}
-                              </span>
-                            ) : s.plan_id ? (
-                              <span style={{ color: "#f59e0b" }}>Missing in Looker</span>
-                            ) : (
-                              <span style={{ color: ui.textMuted }}>New (unsynced)</span>
+                  </thead>
+                  <tbody>
+                    {displayedDraftSlices.length === 0 ? (
+                      <tr>
+                        <td
+                          colSpan={isZeroFilterDashboard ? 4 : 5}
+                          style={{ padding: 14, textAlign: "center", color: ui.textMuted }}
+                        >
+                          {draft.slices.length === 0
+                            ? "Load filter values above, paste lines, or click + Add Delivery Row."
+                            : "No delivery rows match your filter."}
+                        </td>
+                      </tr>
+                    ) : (
+                      displayedDraftSlices.map((s) => {
+                        const live = s.plan_id ? livePlansById[s.plan_id] : undefined;
+                        const outPrefix = buildSliceOutputPrefix(
+                          draft.output_folder,
+                          s.slug || s.label
+                        );
+                        return (
+                          <tr key={s.id} style={{ borderBottom: `1px solid ${ui.border}` }}>
+                            <td style={{ padding: "5px 8px" }}>
+                              <input
+                                type="text"
+                                value={s.label}
+                                onChange={(e) =>
+                                  setDraft({
+                                    ...draft,
+                                    slices: draft.slices.map((row) =>
+                                      row.id === s.id ? { ...row, label: e.target.value } : row
+                                    ),
+                                  })
+                                }
+                                style={inputStyle}
+                              />
+                            </td>
+                            <td style={{ padding: "5px 8px" }}>
+                              <input
+                                type="text"
+                                value={s.slug}
+                                onChange={(e) =>
+                                  setDraft({
+                                    ...draft,
+                                    slices: draft.slices.map((row) =>
+                                      row.id === s.id ? { ...row, slug: e.target.value } : row
+                                    ),
+                                  })
+                                }
+                                style={inputStyle}
+                              />
+                              <div style={{ fontSize: 10.5, color: ui.textMuted, marginTop: 2 }}>
+                                <code>{outPrefix}_&lt;ts&gt;.pptx</code>
+                              </div>
+                            </td>
+                            {!isZeroFilterDashboard && (
+                              <td style={{ padding: "5px 8px" }}>
+                                <input
+                                  type="text"
+                                  value={s.filters?.[primarySliceFilterKey] ?? ""}
+                                  onChange={(e) =>
+                                    setDraft({
+                                      ...draft,
+                                      slices: draft.slices.map((row) =>
+                                        row.id === s.id
+                                          ? {
+                                              ...row,
+                                              filters: {
+                                                ...row.filters,
+                                                [primarySliceFilterKey]: e.target.value,
+                                              },
+                                            }
+                                          : row
+                                      ),
+                                    })
+                                  }
+                                  placeholder="Filter value..."
+                                  style={inputStyle}
+                                />
+                              </td>
                             )}
-                          </td>
-                          <td style={{ padding: "5px 8px", textAlign: "right" }}>
-                            <button
-                              type="button"
-                              aria-label={`Remove slice ${s.label}`}
-                              onClick={() =>
-                                setDraft({
-                                  ...draft,
-                                  slices: draft.slices.filter((row) => row.id !== s.id),
-                                })
-                              }
-                              style={{
-                                background: "none",
-                                border: "none",
-                                color: "#ef4444",
-                                cursor: "pointer",
-                                fontWeight: 700,
-                                fontSize: 13,
-                              }}
-                            >
-                              ✕
-                            </button>
-                          </td>
-                        </tr>
-                      );
-                    })
-                  )}
-                </tbody>
-              </table>
-            </div>
+                            <td style={{ padding: "5px 8px", whiteSpace: "nowrap", fontSize: 11.5 }}>
+                              {live ? (
+                                <span style={{ color: isDark ? "#34d399" : "#047857" }}>
+                                  Plan #{s.plan_id}
+                                </span>
+                              ) : s.plan_id ? (
+                                <span style={{ color: "#f59e0b" }}>Missing in Looker</span>
+                              ) : (
+                                <span style={{ color: ui.textMuted }}>New (unsynced)</span>
+                              )}
+                            </td>
+                            <td style={{ padding: "5px 8px", textAlign: "right", whiteSpace: "nowrap" }}>
+                              <button
+                                type="button"
+                                title="Preview dashboard with this row's filters"
+                                onClick={() => {
+                                  setPreviewSliceId(s.id);
+                                  setEmbedOpen(true);
+                                }}
+                                style={{
+                                  background: "none",
+                                  border: "none",
+                                  color: ui.accent,
+                                  cursor: "pointer",
+                                  fontWeight: 600,
+                                  fontSize: 11.5,
+                                  marginRight: 6,
+                                }}
+                              >
+                                Preview
+                              </button>
+                              {(!isZeroFilterDashboard || draft.slices.length > 1) && (
+                                <button
+                                  type="button"
+                                  aria-label={`Remove delivery ${s.label}`}
+                                  onClick={() =>
+                                    setDraft({
+                                      ...draft,
+                                      slices: draft.slices.filter((row) => row.id !== s.id),
+                                    })
+                                  }
+                                  style={{
+                                    background: "none",
+                                    border: "none",
+                                    color: "#ef4444",
+                                    cursor: "pointer",
+                                    fontWeight: 700,
+                                    fontSize: 13,
+                                  }}
+                                >
+                                  ✕
+                                </button>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </div>
         </form>
       ) : (
         <>
-          {/* Fleet Toolbar: Filter by Dashboard + Refresh + New Master Schedule */}
+          {/* Fleet Toolbar: Filter by Dashboard + Refresh + New Batch */}
           <div
             style={{
               background: ui.cardBg,
@@ -1912,11 +2629,7 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
                 />
               </div>
               {filterDashId && (
-                <button
-                  type="button"
-                  onClick={() => setFilterDashId("")}
-                  style={btnSecondary}
-                >
+                <button type="button" onClick={() => setFilterDashId("")} style={btnSecondary}>
                   All Dashboards
                 </button>
               )}
@@ -1956,12 +2669,12 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
                   fontWeight: 700,
                 }}
               >
-                + New Master Schedule
+                + New Batch
               </button>
             </div>
           </div>
 
-          {/* Master Fanout Schedule Cards */}
+          {/* Batch Cards */}
           {loading ? (
             <div
               style={{
@@ -1974,7 +2687,7 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
                 color: ui.textMuted,
               }}
             >
-              Loading Master Fanout schedules...
+              Loading Batches...
             </div>
           ) : records.length === 0 ? (
             <div
@@ -1988,11 +2701,11 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
               }}
             >
               <div style={{ fontSize: 14.5, fontWeight: 700, marginBottom: 6 }}>
-                No Master Fanout Schedules{filterDashId ? " for this Dashboard" : ""}
+                No Batches{filterDashId ? " for this Dashboard" : ""}
               </div>
               <p style={{ margin: "0 0 14px", fontSize: 12.5, color: ui.textMuted }}>
-                Create one Master Schedule to fan out a PowerPoint template across N dashboard
-                filter slices on a single cadence.
+                Create a Batch to run a PowerPoint template across one or more dashboard deliveries
+                on a shared cadence.
               </p>
               <button
                 type="button"
@@ -2012,7 +2725,7 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
                   fontWeight: 700,
                 }}
               >
-                + Create First Master Schedule
+                + Create First Batch
               </button>
             </div>
           ) : (
@@ -2024,7 +2737,7 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
               const liveCount = spec.slices.filter(
                 (s) => s.plan_id && livePlansById[s.plan_id]
               ).length;
-              const folderPrefix = `${sanitizeOutputFolder(spec.output_folder, "fanout")}/`;
+              const folderPrefix = `${sanitizeOutputFolder(spec.output_folder, "batch")}/`;
               const samplePlan = spec.slices
                 .map((s) => (s.plan_id ? livePlansById[s.plan_id] : null))
                 .find(Boolean);
@@ -2052,7 +2765,9 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
                     }}
                   >
                     <div>
-                      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                      <div
+                        style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}
+                      >
                         <span style={{ fontSize: 15, fontWeight: 700 }}>{spec.title}</span>
                         <span
                           style={{
@@ -2081,7 +2796,7 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
                           {!spec.enabled
                             ? "Paused"
                             : driftedCount > 0
-                              ? `${driftedCount} slice(s) need sync`
+                              ? `${driftedCount} delivery plan(s) need sync`
                               : `Active (${liveCount}/${spec.slices.length} synced)`}
                         </span>
                       </div>
@@ -2153,7 +2868,7 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
                           <button
                             type="button"
                             disabled={Boolean(busyMessage)}
-                            onClick={() => void handleDeleteMaster(rec)}
+                            onClick={() => void handleDeleteBatch(rec)}
                             style={{
                               ...btnSecondary,
                               background: "#dc2626",
@@ -2184,7 +2899,7 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
                     </div>
                   </div>
 
-                  {/* Slice Fleet Summary Chips / Mini Table */}
+                  {/* Delivery Summary Table */}
                   <div
                     style={{
                       border: `1px solid ${ui.border}`,
@@ -2201,7 +2916,7 @@ export const SchedulerView: React.FC<SchedulerViewProps> = ({
                             textAlign: "left",
                           }}
                         >
-                          <th style={{ padding: "5px 8px" }}>Slice</th>
+                          <th style={{ padding: "5px 8px" }}>Delivery</th>
                           <th style={{ padding: "5px 8px" }}>Filters</th>
                           <th style={{ padding: "5px 8px" }}>Output Prefix</th>
                           <th style={{ padding: "5px 8px" }}>Looker Plan</th>

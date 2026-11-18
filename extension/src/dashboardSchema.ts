@@ -119,9 +119,10 @@ function resolveColumnsForQuery(
  */
 export async function fetchDashboardTileSchemas(
   core40SDK: any,
-  dashboardId: string
+  dashboardId: string,
+  preloadedDash?: any
 ): Promise<DashboardTileSchema[]> {
-  const dash = await core40SDK.ok(core40SDK.dashboard(dashboardId));
+  const dash = preloadedDash ?? (await core40SDK.ok(core40SDK.dashboard(dashboardId)));
   const elements: any[] = Array.isArray(dash?.dashboard_elements) ? dash.dashboard_elements : [];
 
   const exploreCache = new Map<string, Map<string, { label: string; labelShort: string }>>();

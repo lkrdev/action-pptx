@@ -36,6 +36,19 @@ export interface MasterFanoutSpec {
   updated_at: string;
 }
 
+export interface TemplateDashboardLink {
+  id: string;
+  title: string;
+}
+
+export interface TemplateLinksDoc {
+  template: string;
+  dashboards: TemplateDashboardLink[];
+  updated_at: string;
+}
+
+export const TEMPLATE_LINKS_SEARCH_PATTERN = "tpl_links.%";
+
 const WEEKDAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] as const;
 
 /**
@@ -53,6 +66,7 @@ export function encodeDashKey(raw: string): string {
   );
 }
 
+// ponytail: keep "fanout.u-*" artifact key prefix for zero-migration backward compatibility with existing saved batches
 export function buildFanoutArtifactKey(
   userId: string,
   dashboardId: string,
@@ -69,7 +83,151 @@ export function buildFanoutSearchPattern(userId: string, dashboardId?: string): 
   return `fanout.u-${encodeDashKey(userId)}.%`;
 }
 
-export function slugifySegment(raw: string, fallback = "slice"): string {
+export function buildTemplateLinksArtifactKey(templateName: string): string {
+  return `tpl_links.${encodeDashKey(templateName)}`;
+}
+
+export function mergeTemplateDashboardLink(
+  existing: TemplateLinksDoc | null | undefined,
+  templateName: string,
+  dash: TemplateDashboardLink,
+  nowIso = new Date().toISOString()
+): TemplateLinksDoc {
+  const cleanTpl = String(templateName || "").trim();
+  const cleanId = String(dash.id || "").trim();
+  const cleanTitle = String(dash.title || cleanId).trim() || cleanId;
+  const prior = Array.isArray(existing?.dashboards) ? existing.dashboards : [];
+  const rest = prior
+    .map((d) => ({ id: String(d?.id || "").trim(), title: String(d?.title || d?.id || "").trim() }))
+    .filter((d) => d.id && d.id !== cleanId);
+  return {
+    template: cleanTpl,
+    dashboards: cleanId ? [{ id: cleanId, title: cleanTitle }, ...rest] : rest,
+    updated_at: nowIso,
+  };
+}
+
+export function parseTemplateLinksArtifacts(
+  rawArtifacts: any[]
+): Record<string, TemplateDashboardLink[]> {
+  const out: Record<string, TemplateDashboardLink[]> = {};
+  for (const art of Array.isArray(rawArtifacts) ? rawArtifacts : []) {
+    try {
+      const parsed = JSON.parse(String(art?.value || "")) as Partial<TemplateLinksDoc>;
+      const tpl = String(parsed?.template || "").trim();
+      if (!tpl || !Array.isArray(parsed?.dashboards)) continue;
+      const links = parsed.dashboards
+        .map((d) => ({
+          id: String(d?.id || "").trim(),
+          title: String(d?.title || d?.id || "").trim(),
+        }))
+        .filter((d) => Boolean(d.id));
+      if (links.length > 0) out[tpl] = links;
+    } catch {
+      // Ignore malformed artifact entries
+    }
+  }
+  return out;
+}
+
+export function findMatchingLinkedTemplate(
+  templatesList: string[],
+  linksMap: Record<string, TemplateDashboardLink[]>,
+  dashboardId: string,
+  dashboardTitle?: string
+): string {
+  const cleanId = String(dashboardId || "").trim();
+  const cleanTitle = String(dashboardTitle || "").trim().toLowerCase();
+  if (!cleanId && !cleanTitle) return "";
+  const candidates = templatesList.length > 0 ? templatesList : Object.keys(linksMap).sort();
+  if (cleanId) {
+    const byId = candidates.find((t) => (linksMap[t] || []).some((d) => d.id === cleanId));
+    if (byId) return byId;
+  }
+  if (cleanTitle) {
+    const byTitle = candidates.find((t) =>
+      (linksMap[t] || []).some((d) => d.title.trim().toLowerCase() === cleanTitle)
+    );
+    if (byTitle) return byTitle;
+  }
+  return "";
+}
+
+export async function upsertTemplateLinkArtifact(
+  core40SDK: any,
+  namespace: string,
+  templateName: string,
+  dash: TemplateDashboardLink
+): Promise<TemplateLinksDoc | null> {
+  const cleanTpl = String(templateName || "").trim();
+  const cleanId = String(dash?.id || "").trim();
+  if (!cleanTpl || !cleanId || typeof core40SDK?.update_artifacts !== "function") return null;
+  const key = buildTemplateLinksArtifactKey(cleanTpl);
+  try {
+    const existing: any[] =
+      typeof core40SDK.artifact === "function"
+        ? await core40SDK.ok(core40SDK.artifact({ namespace, key })).catch(() => [])
+        : [];
+    let prior: TemplateLinksDoc | null = null;
+    let ver: number | undefined;
+    if (Array.isArray(existing) && existing[0]) {
+      if (typeof existing[0].version === "number") ver = existing[0].version;
+      try {
+        prior = JSON.parse(String(existing[0].value || "")) as TemplateLinksDoc;
+      } catch {
+        prior = null;
+      }
+    }
+    const merged = mergeTemplateDashboardLink(prior, cleanTpl, {
+      id: cleanId,
+      title: String(dash.title || cleanId),
+    });
+    await core40SDK.ok(
+      core40SDK.update_artifacts(namespace, [
+        {
+          key,
+          value: JSON.stringify(merged),
+          content_type: "application/json",
+          ...(ver !== undefined ? { version: ver } : {}),
+        },
+      ])
+    );
+    return merged;
+  } catch {
+    return null;
+  }
+}
+
+export function extractDashboardModels(dash: any): string[] {
+  const models = new Set<string>();
+  const add = (val: unknown) => {
+    const s = String(val || "").trim();
+    if (s) models.add(s);
+  };
+  const dashId = String(dash?.id || "").trim();
+  if (dashId.includes("::")) add(dashId.split("::")[0]);
+  add(dash?.model?.id);
+  for (const f of Array.isArray(dash?.dashboard_filters) ? dash.dashboard_filters : []) {
+    add(f?.model);
+  }
+  for (const el of Array.isArray(dash?.dashboard_elements) ? dash.dashboard_elements : []) {
+    add(el?.query?.model);
+    add(el?.look?.query?.model);
+    add(el?.result_maker?.query?.model);
+    for (const fl of Array.isArray(el?.result_maker?.filterables)
+      ? el.result_maker.filterables
+      : []) {
+      add(fl?.model);
+    }
+  }
+  return Array.from(models).sort();
+}
+
+export function formatDatagroupValue(modelName: string, name: string): string {
+  return `${String(modelName || "").trim()}::${String(name || "").trim()}`;
+}
+
+export function slugifySegment(raw: string, fallback = "delivery"): string {
   const cleaned = String(raw || "")
     .trim()
     .replace(/[^a-zA-Z0-9_-]+/g, "_")
@@ -77,7 +235,7 @@ export function slugifySegment(raw: string, fallback = "slice"): string {
   return cleaned || fallback;
 }
 
-export function sanitizeOutputFolder(raw: string, fallback = "fanout"): string {
+export function sanitizeOutputFolder(raw: string, fallback = "batch"): string {
   const stripped = String(raw || "")
     .replace(/\.pptx$/i, "")
     .trim();
@@ -91,13 +249,13 @@ export function sanitizeOutputFolder(raw: string, fallback = "fanout"): string {
 }
 
 export function buildSliceOutputPrefix(outputFolder: string, sliceSlug: string): string {
-  return `${sanitizeOutputFolder(outputFolder, "fanout")}/${slugifySegment(sliceSlug, "slice")}`;
+  return `${sanitizeOutputFolder(outputFolder, "batch")}/${slugifySegment(sliceSlug, "delivery")}`;
 }
 
-export function serializeFiltersString(
+export function mergeEffectiveFilters(
   baseFilters: Record<string, string>,
   sliceFilters: Record<string, string>
-): string {
+): Record<string, string> {
   const merged: Record<string, string> = {};
   for (const src of [baseFilters, sliceFilters]) {
     for (const [k, v] of Object.entries(src || {})) {
@@ -106,6 +264,32 @@ export function serializeFiltersString(
       if (key && val) merged[key] = val;
     }
   }
+  return merged;
+}
+
+export function buildEmbedFilterParams(
+  baseFilters: Record<string, string>,
+  sliceFilters: Record<string, string>,
+  dashboardFilterDefaults: Array<{ name: string; defaultValue?: string }>
+): Record<string, string> {
+  const effective = mergeEffectiveFilters(baseFilters, sliceFilters);
+  const out: Record<string, string> = {};
+  for (const f of dashboardFilterDefaults) {
+    const name = String(f.name || "").trim();
+    if (!name) continue;
+    out[name] = effective[name] ?? String(f.defaultValue ?? "");
+  }
+  for (const [k, v] of Object.entries(effective)) {
+    out[k] = v;
+  }
+  return out;
+}
+
+export function serializeFiltersString(
+  baseFilters: Record<string, string>,
+  sliceFilters: Record<string, string>
+): string {
+  const merged = mergeEffectiveFilters(baseFilters, sliceFilters);
   const params = new URLSearchParams();
   for (const key of Object.keys(merged).sort()) {
     params.set(key, merged[key]);

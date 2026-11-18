@@ -207,6 +207,7 @@ application: action_pptx_template_manager {
       "delete_user_attribute",
       "all_themes",
       "all_color_collections",
+      "all_datagroups",
       "search_scheduled_plans",
       "create_scheduled_plan",
       "update_scheduled_plan",
@@ -230,6 +231,7 @@ application: action_pptx_template_manager {
     local_storage: yes
     new_window: yes
     use_downloads: yes
+    use_embeds: yes
     use_form_submit: yes
   }
 }
@@ -241,7 +243,7 @@ application: action_pptx_template_manager {
 2. Switch between the three built-in views from the header navigation bar:
    - **Builder (`/`)** — Validate `.pptx` bindings against live Looker dashboards, preview themed decks, and upload templates to GCS.
    - **Viewer (`/viewer`)** — Browse, search (`?q=<subpath>`), preview, and download rendered `.pptx` outputs and saved templates.
-   - **Scheduler (`/scheduler`)** — Manage **Master Fanout Schedules** (1 dashboard + 1 template + 1 cadence → *N* Looker `ScheduledPlan` filter slices writing to `{output_folder}/{slice_slug}_<timestamp>.pptx`, backed by Looker Artifacts and reconciled via `search_scheduled_plans`). Looker Admins with `see_schedules` can inspect or manage another user's Master Fanout schedules one user at a time by appending `?user_id=<looker_user_id>` (e.g. `/scheduler?user_id=42`).
+   - **Batches (`/scheduler`)** — Manage **PowerPoint Batches** (1 dashboard + 1 validated template + 1 schedule or LookML datagroup → *N* Looker `ScheduledPlan` filter deliveries writing to `{output_folder}/{delivery_slug}_<timestamp>.pptx`, backed by Looker Artifacts and reconciled via `search_scheduled_plans`). Looker Admins with `see_schedules` can inspect or manage another user's batches one user at a time by appending `?user_id=<looker_user_id>` (e.g. `/scheduler?user_id=42`).
 3. To build the extension bundle locally from source (`extension/dist/bundle.js`):
 
 ```bash

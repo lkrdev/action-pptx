@@ -189,12 +189,12 @@ view: inventory_items {
   dimension: region_sort {
     type: number
     hidden: yes
-    sql: ${row_num} ;;
+    sql: MOD(DIV(CAST(${TABLE}.id AS INT64), 4), 4) ;;
   }
   dimension: region {
     label: "Region"
     type: string
-    sql: CASE ${row_num}
+    sql: CASE ${region_sort}
       WHEN 0 THEN 'North America'
       WHEN 1 THEN 'EMEA'
       WHEN 2 THEN 'APAC'
@@ -203,7 +203,7 @@ view: inventory_items {
   measure: prior_customers {
     label: "Prior Customers"
     type: max
-    sql: CASE ${row_num}
+    sql: CASE ${region_sort}
       WHEN 0 THEN 710
       WHEN 1 THEN 820
       WHEN 2 THEN 940
@@ -212,7 +212,7 @@ view: inventory_items {
   measure: current_customers {
     label: "Current Customers"
     type: max
-    sql: CASE ${row_num}
+    sql: CASE ${region_sort}
       WHEN 0 THEN 745
       WHEN 1 THEN 890
       WHEN 2 THEN 988

@@ -956,6 +956,27 @@ def create_app() -> FastAPI:
     ) -> dict[str, object]:
         return _download_viewer_bucket(payload.templates_gcs_uri, payload.filename, authorization)
 
+    @app.post("/templates/delete")
+    async def delete_template_viewer(
+        payload: TemplateDownloadRequest,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, object]:
+        settings = load_settings()
+        passthrough_token = _require_viewer_auth(authorization, settings)
+        try:
+            clean_name = config.sanitize_relative_pptx_name(payload.filename)
+            deleted_uri = gcs.delete_template_blob(
+                payload.templates_gcs_uri,
+                clean_name,
+                settings.allowed_gcs_buckets,
+                oauth_token=passthrough_token,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"GCS delete failed: {exc}") from exc
+        return {"deleted": clean_name, "gcs_uri": deleted_uri}
+
     return app
 
 
