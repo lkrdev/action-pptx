@@ -322,6 +322,19 @@ def _provision_external_lb(
         ],
     )
     cidrs = [c.strip() for c in allowed_cidrs.split(",") if c.strip()]
+    policy_desc = run_cmd(
+        ["gcloud", "compute", "security-policies", "describe", armor_name, "--format=json"],
+        capture_output=True,
+        check=False,
+    )
+    rule_exists = False
+    if policy_desc.returncode == 0:
+        try:
+            policy_data = json.loads(policy_desc.stdout or "{}")
+            rule_exists = any(r.get("priority") == 1000 for r in policy_data.get("rules", []))
+        except json.JSONDecodeError:
+            pass
+
     if cidrs:
         run_cmd(
             [
@@ -333,16 +346,6 @@ def _provision_external_lb(
                 "2147483647",
                 f"--security-policy={armor_name}",
                 "--action=deny-403",
-            ]
-        )
-        rule_exists = _gcloud_exists(
-            [
-                "compute",
-                "security-policies",
-                "rules",
-                "describe",
-                "1000",
-                f"--security-policy={armor_name}",
             ]
         )
         run_cmd(
@@ -359,6 +362,32 @@ def _provision_external_lb(
                 "--description=Allowed Looker / corporate CIDRs",
             ]
         )
+    else:
+        run_cmd(
+            [
+                "gcloud",
+                "compute",
+                "security-policies",
+                "rules",
+                "update",
+                "2147483647",
+                f"--security-policy={armor_name}",
+                "--action=allow",
+            ]
+        )
+        if rule_exists:
+            run_cmd(
+                [
+                    "gcloud",
+                    "compute",
+                    "security-policies",
+                    "rules",
+                    "delete",
+                    "1000",
+                    f"--security-policy={armor_name}",
+                    "--quiet",
+                ]
+            )
 
     backend_name = "action-pptx-backend"
     if _ensure_gcloud(

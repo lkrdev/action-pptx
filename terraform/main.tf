@@ -140,13 +140,6 @@ resource "google_cloud_run_v2_service" "service" {
           }
         }
       }
-
-      dynamic "env" {
-        for_each = var.enable_iam_scheduler && var.looker_base_url != "" ? [1] : []
-        content {
-          name  = "LOOKERSDK_BASE_URL"
-          value = trimsuffix(var.looker_base_url, "/")
-        }
     }
   }
 
